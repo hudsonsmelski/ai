@@ -26,7 +26,7 @@ Model Configuration:
   Vocab size: 97
   Memory: 20 x 97
   Controller: RNN
-  Total parameters: 839,434
+  Total parameters: 344,422
 
 ...
 
