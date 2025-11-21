@@ -15,6 +15,38 @@ Neural Turing Machine
 
 ### Copy Task
 
+```
+> python ntm_copy_task.py
+============================================================
+NTM BATCHED COPY TASK TRAINING
+============================================================
+Device: cuda
+
+Model Configuration:
+  Vocab size: 97
+  Memory: 20 x 97
+  Controller: RNN
+  Total parameters: 839,434
+
+...
+
+[Iter  7900] Loss=0.8753 (avg=0.8803), Acc=97.81%, Len=20, GradNorm=0.89, LR=1.00e-03, Speed=5.8 it/s
+  Target:  'Pqh-7R:`E{O9Mk7(TZ|o'
+  Predict: 'Pqh-:R:`E{O9Mk7(TZ|o'
+
+============================================================
+=== TRAINING COMPLETE ===
+Reached acc=99.06% and loss=0.8579 at max seq_len=20
+============================================================
+
+>>> Final model saved to: ./models/ntm_copy_final.pt
+>>> Best model (acc=96.41%) saved to: ./models/ntm_copy_best.pt
+
+============================================================
+TRAINING FINISHED
+Final model: ./models/ntm_copy_final.pt
+============================================================
+```
 
 ## RTNTM
 
@@ -23,7 +55,7 @@ Recurrent Transformer NTM
 ### Copy Task
 
 ```
-> python training/rtntm_copy_task.py
+> python rtntm_copy_task.py
 ============================================================
 TNTM COPY TASK TRAINING
 ============================================================

@@ -95,11 +95,18 @@ def train_copy_task_until_converged(
         # Loss
         loss = F.cross_entropy(
             pred_logits.reshape(-1, vocab_size),
-            target_seq.reshape(-1)
+            target_seq.reshape(-1),
+            label_smoothing=0.1
         )
+        # Encourage sharp attention (penalize entropy)
+        read_entropy = -(model.read_w * (model.read_w + 1e-8).log()).sum(-1).mean()
+        write_entropy = -(model.write_w * (model.write_w + 1e-8).log()).sum(-1).mean()
+        entropy_loss = 0.01 * (read_entropy + write_entropy)
+
+        total_loss = loss + entropy_loss
 
         optimizer.zero_grad()
-        loss.backward()
+        total_loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         optimizer.step()
 
@@ -193,8 +200,15 @@ def train_copy_task_until_converged(
             }, ckpt_path)
             print(f">>> Checkpoint saved: {ckpt_path}")
 
+        if acc >= 0.99 and loss_val > 0.1:
+            print(f"DEBUG: acc={acc:.4f}, loss={loss_val:.4f}")
+            print(f"Logits stats: min={pred_logits.min():.2f}, max={pred_logits.max():.2f}")
+            print(f"Target predictions: {pred_logits.reshape(-1, vocab_size).argmax(dim=-1)[:10]}")
+            print(f"Target truth:       {target_seq.reshape(-1)[:10]}")
+
         # Curriculum & early stopping
-        if acc >= acc_threshold and loss_val < loss_threshold:
+        # TODO: for some reason the loss is way too high for 100% accuracy.
+        if acc >= acc_threshold:# and loss_val < loss_threshold:
             if current_seq_len >= seq_len_max:
                 print("\n" + "="*60)
                 print("=== TRAINING COMPLETE ===")
@@ -204,7 +218,7 @@ def train_copy_task_until_converged(
             else:
                 current_seq_len = min(current_seq_len + 2, seq_len_max)
                 print(f"\n>>> Curriculum: Increasing seq_len to {current_seq_len} <<<\n")
-                optimizer = Adam(model.parameters(), lr=optimizer.param_groups[0]['lr'], weight_decay=1e-5)
+                #optimizer = Adam(model.parameters(), lr=optimizer.param_groups[0]['lr'], weight_decay=1e-5)
 
     # Final save
     final_path = os.path.join(model_dir, "ntm_copy_final.pt")
@@ -231,20 +245,23 @@ if __name__ == "__main__":
     print(f"Device: {device}")
     print()
 
-    memory_length = 128
+    memory_length = 20
     model = NTM(
         vocab_size=vocab_size,
         memory_length=memory_length,
         controller_depth=1,
         read_heads=1,
         write_heads=1,
-        use_lstm = True
+        use_lstm = False
     ).to(device)
+
+    model_controller = "LSTM" if model.use_lstm else "RNN"
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model Configuration:")
     print(f"  Vocab size: {vocab_size}")
     print(f"  Memory: {memory_length} x {vocab_size}")
+    print(f"  Controller: {model_controller}")
     print(f"  Total parameters: {total_params:,}")
     print()
 
@@ -254,7 +271,7 @@ if __name__ == "__main__":
         max_iters=50000,
         seq_len_start=4,
         seq_len_max=20,
-        batch_size=16,
+        batch_size=32,
         lr=1e-3,
         print_every=100,
         eval_every=500,

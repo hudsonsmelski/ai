@@ -74,10 +74,15 @@ class NTM(nn.Module):
                 batch_first=False
             )
 
+        for name, param in self.controller.named_parameters():
+            if 'weight' in name:
+                nn.init.xavier_uniform_(param, gain=2.0)  # Increase gain
+
         # Initialize memory buffer
         self.register_buffer('memory_initial', torch.zeros(self.N, self.M))
-        stdev = 1 / sqrt(self.N + self.M)
-        nn.init.uniform_(self.memory_initial, -stdev, stdev)
+        #nn.init.xavier_uniform_(self.memory_initial)
+
+        self.logit_scale = nn.Parameter(torch.ones(1) * 5.0)
 
         # Batch state (will be set by reset)
         self.batch_size = None
@@ -99,11 +104,13 @@ class NTM(nn.Module):
         self.memory = self.memory_initial.unsqueeze(0).repeat(batch_size, 1, 1).clone()
 
         # Weights: [batch, N]
-        self.read_w = F.softmax(torch.randn(batch_size, self.N, device=device), dim=-1)
-        self.write_w = F.softmax(torch.randn(batch_size, self.N, device=device), dim=-1)
+        init_w = torch.zeros(batch_size, self.N, device=device)
+        init_w[:, 0] = 1.0  # Start focused on first memory location
+        self.read_w = init_w.clone()
+        self.write_w = init_w.clone()
 
         # Last read: [batch, M]
-        self.last_read = torch.zeros(batch_size, self.M, device=device)
+        self.last_read = torch.randn(batch_size, self.M, device=device) * 0.01
 
         # controller states: [num_layers, batch, hidden_size]
         self.hidden = torch.zeros(self.controller_depth, batch_size, self.controller_output, device=device)
@@ -227,6 +234,7 @@ class NTM(nn.Module):
             add_matrix = wt.unsqueeze(-1) * add_v.unsqueeze(1)  # [batch, N, M]
             self.memory = self.memory + add_matrix
 
+        y = y * self.logit_scale
         return y
 
 
