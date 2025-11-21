@@ -1,5 +1,5 @@
 # ================================================================
-# IMPROVED TRAINING SCRIPT FOR TNTM ON THE COPY TASK
+# TRAINING SCRIPT FOR NTM ON THE COPY TASK
 # ================================================================
 #
 # Hudson Andrew Smelski
@@ -12,7 +12,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 import time
 from collections import deque
 
-from rtntm import *
+from ntm import *
 
 def ensure_dir(path):
     if not os.path.exists(path):
@@ -21,27 +21,30 @@ def ensure_dir(path):
 
 def generate_copy_batch(batch_size, seq_len, vocab_size, device):
     """
-    Creates a batch for the copy task:
-    Input:  random sequence + delimiter token + blank tokens for output
-    Target: original sequence
+    Creates a batch for the copy task
+    Returns: input_seq [total_len, batch, vocab_size], target_seq [seq_len, batch]
     """
-    seq = torch.randint(0, vocab_size - 1, (seq_len, batch_size), device=device)
+    # Random sequences
+    seqs = torch.randint(0, vocab_size - 1, (seq_len, batch_size), device=device)
     delimiter = (vocab_size - 1) * torch.ones(1, batch_size, dtype=torch.long, device=device)
-    # Add blank tokens for model to output into
     blanks = torch.zeros(seq_len, batch_size, dtype=torch.long, device=device)
-    x = torch.cat([seq, delimiter, blanks], dim=0)  # [2*seq_len + 1, batch]
-    y = seq.clone()
-    return x, y
+
+    # Input: seq + delimiter + blanks
+    input_indices = torch.cat([seqs, delimiter, blanks], dim=0)  # [2*seq_len+1, batch]
+
+    # One-hot encode
+    input_seq = F.one_hot(input_indices, num_classes=vocab_size).float()  # [2*seq_len+1, batch, vocab]
+
+    return input_seq, seqs
 
 
-def evaluate_copy_accuracy(logits, targets):
+def evaluate_copy_accuracy(predictions, targets):
     """
-    logits: [seq_len * batch, vocab]
-    targets: [seq_len * batch]
-    Returns percentage of correctly predicted tokens.
+    predictions: [seq_len, batch, vocab_size]
+    targets: [seq_len, batch]
     """
-    preds = torch.argmax(logits, dim=-1)
-    correct = (preds == targets).float().mean().item()
+    pred_tokens = torch.argmax(predictions, dim=-1)
+    correct = (pred_tokens == targets).float().mean().item()
     return correct
 
 
@@ -49,10 +52,10 @@ def train_copy_task_until_converged(
     model,
     device,
     max_iters=50000,
-    seq_len_start=4,        # Curriculum: start small
+    seq_len_start=4,
     seq_len_max=20,
-    batch_size=8,           # Larger batch for stability
-    lr=1e-3,                # Higher initial LR
+    batch_size=8,
+    lr=1e-4,
     print_every=100,
     eval_every=500,
     save_every=2000,
@@ -63,85 +66,83 @@ def train_copy_task_until_converged(
 
     ensure_dir(model_dir)
     optimizer = Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
     model.train()
 
-    # Curriculum learning
     current_seq_len = seq_len_start
-
-    # Moving average for loss smoothing
     loss_history = deque(maxlen=100)
-
-    # Best model tracking
-    best_loss = float('inf')
     best_acc = 0.0
+    best_path = os.path.join(model_dir, "ntm_copy_best.pt")
 
     start_time = time.time()
 
     for it in range(1, max_iters + 1):
-        # ----------------------------
         # Generate batch
-        # ----------------------------
-        x, y = generate_copy_batch(batch_size, current_seq_len, vocab_size, device)
-        state = model.init_state(batch_size=batch_size, device=device)
+        input_seq, target_seq = generate_copy_batch(batch_size, current_seq_len, vocab_size, device)
 
-        # ----------------------------
-        # Run model on entire input sequence
-        # ----------------------------
-        logits_all = []
-        for t in range(x.shape[0]):
-            logits, state = model.step(x[t], state)
-            logits_all.append(logits.unsqueeze(0))
+        # Reset NTM
+        model.reset(batch_size=batch_size)
 
-        logits_all = torch.cat(logits_all, dim=0)                     # [2*seq_len+1, batch, vocab]
-        pred_logits = logits_all[-(current_seq_len):, :, :]           # last seq_len predictions
-        pred_logits = pred_logits.reshape(-1, vocab_size)             # [seq_len*batch, vocab]
-        targets = y.reshape(-1)                                        # [seq_len*batch]
+        # Forward pass through sequence
+        outputs = []
+        for t in range(input_seq.size(0)):
+            y = model.forward(input_seq[t])  # [batch, vocab_size]
+            outputs.append(y)
 
-        # ----------------------------
-        # Loss + backward with gradient clipping
-        # ----------------------------
-        loss = F.cross_entropy(pred_logits, targets)
+        outputs = torch.stack(outputs, dim=0)  # [total_len, batch, vocab_size]
+        pred_logits = outputs[-(current_seq_len):, :, :]  # [seq_len, batch, vocab_size]
+
+        # Loss
+        loss = F.cross_entropy(
+            pred_logits.reshape(-1, vocab_size),
+            target_seq.reshape(-1)
+        )
+
         optimizer.zero_grad()
         loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         optimizer.step()
 
         loss_val = loss.item()
         loss_history.append(loss_val)
 
-        # ----------------------------
-        # Periodic evaluation
-        # ----------------------------
+        # Evaluation
         if it % eval_every == 0:
             model.eval()
             with torch.no_grad():
-                # Evaluate on a larger sequence
                 eval_seq_len = min(current_seq_len + 5, seq_len_max)
-                x_eval, y_eval = generate_copy_batch(batch_size, eval_seq_len, vocab_size, device)
-                state_eval = model.init_state(batch_size=batch_size, device=device)
+                input_eval, target_eval = generate_copy_batch(batch_size, eval_seq_len, vocab_size, device)
 
-                logits_eval = []
-                for t in range(x_eval.shape[0]):
-                    logits_t, state_eval = model.step(x_eval[t], state_eval)
-                    logits_eval.append(logits_t.unsqueeze(0))
+                model.reset(batch_size=batch_size)
+                outputs_eval = []
+                for t in range(input_eval.size(0)):
+                    y = model.forward(input_eval[t])
+                    outputs_eval.append(y)
 
-                logits_eval = torch.cat(logits_eval, dim=0)
-                pred_eval = logits_eval[-(eval_seq_len):, :, :].reshape(-1, vocab_size)
-                targets_eval = y_eval.reshape(-1)
+                outputs_eval = torch.stack(outputs_eval, dim=0)
+                pred_eval = outputs_eval[-(eval_seq_len):, :, :]
 
-                eval_loss = F.cross_entropy(pred_eval, targets_eval).item()
-                eval_acc = evaluate_copy_accuracy(pred_eval, targets_eval)
+                eval_loss = F.cross_entropy(
+                    pred_eval.reshape(-1, vocab_size),
+                    target_eval.reshape(-1)
+                ).item()
+
+                eval_acc = evaluate_copy_accuracy(pred_eval, target_eval)
 
                 print(f"\n[EVAL Iter {it}] Eval Loss={eval_loss:.4f}, Eval Acc={eval_acc*100:.2f}% (len={eval_seq_len})")
 
-                # Update scheduler
+                # Show example (first in batch)
+                pred_tokens = torch.argmax(pred_eval[:, 0, :], dim=-1).cpu().tolist()
+                target_tokens = target_eval[:, 0].cpu().tolist()
+                pred_str = ''.join(idx_to_char.get(i, '?') for i in pred_tokens)
+                target_str = ''.join(idx_to_char.get(i, '?') for i in target_tokens)
+                print(f"  Eval Target:  {repr(target_str)}")
+                print(f"  Eval Predict: {repr(pred_str)}\n")
+
                 scheduler.step(eval_loss)
 
-                # Save best model
                 if eval_acc > best_acc:
                     best_acc = eval_acc
-                    best_path = os.path.join(model_dir, "rtntm_copy_best.pt")
                     torch.save({
                         'iteration': it,
                         'model_state_dict': model.state_dict(),
@@ -154,14 +155,10 @@ def train_copy_task_until_converged(
 
             model.train()
 
-        # ----------------------------
         # Training metrics
-        # ----------------------------
-        acc = evaluate_copy_accuracy(pred_logits, targets)
+        acc = evaluate_copy_accuracy(pred_logits, target_seq)
 
-        # ----------------------------
         # Logging
-        # ----------------------------
         if it % print_every == 0:
             avg_loss = sum(loss_history) / len(loss_history) if loss_history else loss_val
             elapsed = time.time() - start_time
@@ -171,21 +168,19 @@ def train_copy_task_until_converged(
                   f"Len={current_seq_len}, GradNorm={grad_norm:.2f}, LR={optimizer.param_groups[0]['lr']:.2e}, "
                   f"Speed={iter_per_sec:.1f} it/s")
 
-            # Show prediction example (first batch item)
+            # Show example (first in batch)
             with torch.no_grad():
-                pred_idxs = torch.argmax(pred_logits, dim=-1)[:current_seq_len].cpu().tolist()
-                tgt_idxs = targets[:current_seq_len].cpu().tolist()
-                pred_seq = ''.join(idx_to_char.get(i, '?') for i in pred_idxs)
-                tgt_seq = ''.join(idx_to_char.get(i, '?') for i in tgt_idxs)
-                print(f"  Target:  {repr(tgt_seq)}")
-                print(f"  Predict: {repr(pred_seq)}")
+                pred_tokens = torch.argmax(pred_logits[:, 0, :], dim=-1).cpu().tolist()
+                target_tokens = target_seq[:, 0].cpu().tolist()
+                pred_str = ''.join(idx_to_char.get(i, '?') for i in pred_tokens)
+                target_str = ''.join(idx_to_char.get(i, '?') for i in target_tokens)
+                print(f"  Target:  {repr(target_str)}")
+                print(f"  Predict: {repr(pred_str)}")
                 print()
 
-        # ----------------------------
-        # Save checkpoint periodically
-        # ----------------------------
+        # Save checkpoint
         if it % save_every == 0:
-            ckpt_path = os.path.join(model_dir, f"rtntm_copy_iter_{it}.pt")
+            ckpt_path = os.path.join(model_dir, f"ntm_copy_iter_{it}.pt")
             torch.save({
                 'iteration': it,
                 'model_state_dict': model.state_dict(),
@@ -198,9 +193,7 @@ def train_copy_task_until_converged(
             }, ckpt_path)
             print(f">>> Checkpoint saved: {ckpt_path}")
 
-        # ----------------------------
-        # Early stopping
-        # ----------------------------
+        # Curriculum & early stopping
         if acc >= acc_threshold and loss_val < loss_threshold:
             if current_seq_len >= seq_len_max:
                 print("\n" + "="*60)
@@ -209,21 +202,16 @@ def train_copy_task_until_converged(
                 print("="*60)
                 break
             else:
-                # Curriculum: gradually increase sequence length
                 current_seq_len = min(current_seq_len + 2, seq_len_max)
                 print(f"\n>>> Curriculum: Increasing seq_len to {current_seq_len} <<<\n")
                 optimizer = Adam(model.parameters(), lr=optimizer.param_groups[0]['lr'], weight_decay=1e-5)
 
-
-    # ----------------------------
     # Final save
-    # ----------------------------
-    final_path = os.path.join(model_dir, "rtntm_copy_final.pt")
+    final_path = os.path.join(model_dir, "ntm_copy_final.pt")
     torch.save({
         'iteration': it,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
         'loss': loss_val,
         'acc': acc,
         'seq_len': current_seq_len,
@@ -238,36 +226,25 @@ def train_copy_task_until_converged(
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("="*60)
-    print("TNTM COPY TASK TRAINING")
+    print("NTM BATCHED COPY TASK TRAINING")
     print("="*60)
     print(f"Device: {device}")
     print()
 
-    # Model hyperparameters
-    memory_N = 25
-    memory_M = 97  # Match d_model
-    d_model = 100
-    n_heads = 4
-    read_heads = 2
-    write_heads = 1
-    shift_K = 3
-
-    model = RTNTM(
+    memory_length = 128
+    model = NTM(
         vocab_size=vocab_size,
-        d_model=d_model,
-        memory_N=memory_N,
-        memory_M=memory_M,
-        n_heads=n_heads,
-        read_heads=read_heads,
-        write_heads=write_heads,
-        shift_width=shift_K
+        memory_length=memory_length,
+        controller_depth=1,
+        read_heads=1,
+        write_heads=1,
+        use_lstm = True
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model Configuration:")
-    print(f"  d_model: {d_model}")
-    print(f"  Memory: {memory_N} x {memory_M}")
-    print(f"  Read/Write heads: {read_heads}/{write_heads}")
+    print(f"  Vocab size: {vocab_size}")
+    print(f"  Memory: {memory_length} x {vocab_size}")
     print(f"  Total parameters: {total_params:,}")
     print()
 
@@ -277,7 +254,7 @@ if __name__ == "__main__":
         max_iters=50000,
         seq_len_start=4,
         seq_len_max=20,
-        batch_size=8,
+        batch_size=16,
         lr=1e-3,
         print_every=100,
         eval_every=500,

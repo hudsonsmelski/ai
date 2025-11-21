@@ -133,7 +133,7 @@ class RecurrentTransformerController(nn.Module):
 # ---------------------------
 # TNTM main model (refactor)
 # ---------------------------
-class TNTM(nn.Module):
+class RTNTM(nn.Module):
     def __init__(self,
                  vocab_size: int,
                  d_model: int,
@@ -405,7 +405,7 @@ if __name__ == "__main__":
     write_heads = 1
     shift_K = 3
 
-    model = TNTM(vocab_size=vocab_size,
+    model = RTNTM(vocab_size=vocab_size,
                  d_model=d_model,
                  memory_N=memory_N,
                  memory_M=memory_M,

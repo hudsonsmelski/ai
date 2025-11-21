@@ -3,7 +3,22 @@ Reproducing NN models from papers, and fiddling around with new ones.
 
 I ran from a python venv in WSL2, so it kinda works on my machine.
 
+## ACT
+
+### Parity
+
+### Addition
+
+## NTM
+
+Neural Turing Machine
+
+### Copy Task
+
+
 ## RTNTM
+
+Recurrent Transformer NTM
 
 ### Copy Task
 
