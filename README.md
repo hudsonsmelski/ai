@@ -3,15 +3,73 @@ Reproducing NN models from papers, and fiddling around with new ones.
 
 I ran from a python venv in WSL2, so it kinda works on my machine.
 
+I'm hoping to combine ACT with the NTM that has memory and can perform memory operations at each time step. I think that the brain probably has many sub components doing this for their specialty, i.e. a controller network that thinks in discrete steps on vision or audio or language symbols. My goal will be a network that decides which specialty to use and when based on the current task. I don't like next token prediction because I think that providing correct answers to well defined tasks is a better goal.
+
 ## ACT
+
+Alex Graves: https://arxiv.org/abs/1603.08983
+
+Adaptive Computation Time recurrent neural network. It allows the network to spend a variable amount of time on the same input vector, radically reducing the size of the net needed on hard combinatoric problems by learning an algorithm instead.
 
 ### Parity
 
+With a careful training curriculum I was able to get the network to reliably train for longer sequences by incrementing by 1 each time. So the vector starts out as mostly zeroes and the ACT net learns to classify with 90% accuracy, then it bumps it up to less and less empty (on average) until it learns to have 90% accuracy again. Filling only the start (or end) of the input vector makes it learn more slowly and is just bad for it's generalization. I definitely have not found the best tweaks to the hyper/curriculum parameters. It also learned to generalize really well, essentially learning the algorithm at ~83% accuracy on first EVAL. This reinforces the idea that a huge network and specialized input encodings are less important than a good architecture and training curriculum. This is the learning for input vectors of length 64, but I overkilled it for higher accuracy convergence. Takes forever.
+TODO: figure out why it gets stuck at ~90% accuracy with 128 hidden size.
+
+```
+> python act_parity_claude.py
+        Using device: cuda
+Start time: 2025-11-25 21:27:48.020907
+================================================================================
+Parity Task - ACT Training
+================================================================================
+Input length: 64
+Hidden size: 2000
+Hidden type: RNN
+Batch size: 128
+Learning rate: 0.0001
+Time penalty (tau): 0.002
+Max steps: 20
+Target accuracy: 0.95
+================================================================================
+Model Configuration:
+  Total parameters: 4,138,002
+  
+...
+
+✓ Saved best model with accuracy: 0.950
+
+================================================================================
+✓ Target accuracy 0.950 reached!
+Final test accuracy: 0.950
+Total training time: 31.69 minutes
+================================================================================
+
+Running final evaluation...
+
+================================================================================
+FINAL RESULTS
+================================================================================
+Test Accuracy:  0.950
+Test Loss:      0.0842
+Average Ponder: 2.63
+Average Steps:  1.6
+Best Accuracy:  0.950
+Total Time:     31.74 minutes
+================================================================================
+```
+
 ### Addition
+
+TODO
 
 ## NTM
 
+Alex Graves, et al: https://arxiv.org/abs/1410.5401
+
 Neural Turing Machine
+
+Really cool architecture, but it has a boring set of problems to train on. DNC network paper does more interesting problems.
 
 ### Copy Task
 
@@ -48,9 +106,15 @@ Final model: ./models/ntm_copy_final.pt
 ============================================================
 ```
 
+## DNC
+
+TODO
+
 ## RTNTM
 
 Recurrent Transformer NTM
+
+I don't understand this at all, so, yeah.
 
 ### Copy Task
 
