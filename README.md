@@ -3,7 +3,7 @@ Reproducing NN models from papers, and fiddling around with new ones.
 
 I ran from a python venv in WSL2, so it kinda works on my machine.
 
-I'm hoping to combine ACT with the NTM that has memory and can perform memory operations at each time step. I think that the brain probably has many sub components doing this for their specialty, i.e. a controller network that thinks in discrete steps on vision or audio or language symbols. My goal will be a network that decides which specialty to use and when based on the current task. I don't like next token prediction because I think that providing correct answers to well defined tasks is a better goal.
+AGI has not been achieved internally, yet.
 
 ## ACT
 
