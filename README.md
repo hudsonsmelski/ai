@@ -59,6 +59,98 @@ Total Time:     31.74 minutes
 ================================================================================
 ```
 
+### Logic
+
+```
+> python act_logic.py
+Using device: cuda
+Start time: 2025-11-27 22:35:56.345850
+================================================================================
+Logic Task - ACT Training
+================================================================================
+Input size: 102
+Hidden size: 300
+Hidden type: LSTM
+Batch size: 16
+Max sequence length: 10
+Max gates per vector: 10
+Learning rate: 0.001
+Time penalty (tau): 0.01
+Max steps: 100
+Target sequence accuracy: 0.95
+================================================================================
+Model Configuration:
+  Total parameters: 486,602
+  
+...
+
+✓ Saved best model with sequence accuracy: 0.988
+
+================================================================================
+✓ Target sequence accuracy 0.950 reached!
+Final sequence accuracy: 0.988
+Total training time: 174.01 minutes
+================================================================================
+
+Running final evaluation...
+
+================================================================================
+FINAL RESULTS
+================================================================================
+Bit Accuracy:      0.990
+Sequence Accuracy: 0.960
+Test Loss:         0.0383
+Average Ponder:    6.00
+Average Steps:     5.4
+Best Seq Accuracy: 0.988
+Total Time:        174.24 minutes
+================================================================================
+
+Testing on 5 example sequences:
+
+Sequence 1 (length 4):
+  t=0: Target=0 Pred=0 ✓ | Ponder=7.81 Steps=7
+  t=1: Target=0 Pred=0 ✓ | Ponder=4.52 Steps=4
+  t=2: Target=0 Pred=0 ✓ | Ponder=12.16 Steps=12
+  t=3: Target=0 Pred=0 ✓ | Ponder=12.54 Steps=12
+  Sequence: ✓ CORRECT
+
+Sequence 2 (length 9):
+  t=0: Target=1 Pred=1 ✓ | Ponder=8.39 Steps=8
+  t=1: Target=1 Pred=1 ✓ | Ponder=7.27 Steps=7
+  t=2: Target=1 Pred=1 ✓ | Ponder=10.74 Steps=10
+  t=3: Target=1 Pred=1 ✓ | Ponder=12.51 Steps=12
+  t=4: Target=0 Pred=0 ✓ | Ponder=4.70 Steps=4
+  t=5: Target=0 Pred=0 ✓ | Ponder=14.51 Steps=14
+  t=6: Target=1 Pred=1 ✓ | Ponder=12.07 Steps=12
+  t=7: Target=1 Pred=1 ✓ | Ponder=13.18 Steps=13
+  t=8: Target=1 Pred=1 ✓ | Ponder=13.37 Steps=13
+  Sequence: ✓ CORRECT
+
+Sequence 3 (length 1):
+  t=0: Target=0 Pred=0 ✓ | Ponder=8.22 Steps=8
+  Sequence: ✓ CORRECT
+
+Sequence 4 (length 7):
+  t=0: Target=1 Pred=1 ✓ | Ponder=4.84 Steps=4
+  t=1: Target=0 Pred=0 ✓ | Ponder=11.20 Steps=11
+  t=2: Target=0 Pred=0 ✓ | Ponder=4.41 Steps=4
+  t=3: Target=1 Pred=1 ✓ | Ponder=12.65 Steps=12
+  t=4: Target=0 Pred=0 ✓ | Ponder=11.02 Steps=11
+  t=5: Target=1 Pred=1 ✓ | Ponder=21.04 Steps=21
+  t=6: Target=1 Pred=1 ✓ | Ponder=9.54 Steps=9
+  Sequence: ✓ CORRECT
+
+Sequence 5 (length 4):
+  t=0: Target=0 Pred=0 ✓ | Ponder=4.71 Steps=4
+  t=1: Target=0 Pred=0 ✓ | Ponder=9.36 Steps=9
+  t=2: Target=0 Pred=0 ✓ | Ponder=12.71 Steps=12
+  t=3: Target=0 Pred=0 ✓ | Ponder=9.58 Steps=9
+  Sequence: ✓ CORRECT
+
+End time: 2025-11-28 01:30:11.985215
+```
+
 ### Addition
 
 TODO
