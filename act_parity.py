@@ -13,7 +13,6 @@ from pathlib import Path
 
 from act import ACT
 
-# Set device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 print(f"Start time: {datetime.datetime.now()}")
@@ -72,11 +71,8 @@ def train_epoch(model, optimizer, criterion, tau, batch_size, input_length,
     total_steps = 0
 
     for _ in range(num_batches):
-        # Generate batch
         X, Y = generate_data(batch_size, input_length, device, max_nonzeros,  placement='random')
         optimizer.zero_grad()
-
-        # Forward pass
         output, ponder_costs, steps = model(X)
 
         # Apply sigmoid to output for binary classification
@@ -84,16 +80,13 @@ def train_epoch(model, optimizer, criterion, tau, batch_size, input_length,
         output = torch.sigmoid(output.squeeze(0))
         target = Y.squeeze(0)
 
-        # Compute loss with ponder penalty
         task_loss = criterion(output, target)
         ponder_mean = ponder_costs.mean()
         total_loss = task_loss + tau * ponder_mean
 
-        # Backward pass
         total_loss.backward()
         optimizer.step()
 
-        # Track metrics (Binary threshold at 0.5)
         predictions = (output > 0.5).float()
         num_correct = (predictions == target).sum().item()
 
@@ -103,7 +96,6 @@ def train_epoch(model, optimizer, criterion, tau, batch_size, input_length,
         total_ponder += ponder_mean.item()
         total_steps += steps.mean().item()
 
-    # Return averages
     return {
         'accuracy': total_accuracy / num_batches,
         'task_loss': total_task_loss / num_batches,
@@ -122,17 +114,11 @@ def evaluate(model, criterion, tau, batch_size, input_length, num_batches, devic
 
     with torch.no_grad():
         for _ in range(num_batches):
-            # Generate batch
             X, Y = generate_data(batch_size, input_length, device, input_length)
-
-            # Forward pass
             output, ponder_costs, steps = model(X)
-
-            # Apply sigmoid
             output = torch.sigmoid(output.squeeze(0))
             target = Y.squeeze(0)
 
-            # Compute metrics
             task_loss = criterion(output, target)
             ponder_mean = ponder_costs.mean()
 
@@ -144,7 +130,6 @@ def evaluate(model, criterion, tau, batch_size, input_length, num_batches, devic
             total_ponder += ponder_mean.item()
             total_steps += steps.mean().item()
 
-    # Return averages
     return {
         'accuracy': total_accuracy / num_batches,
         'task_loss': total_task_loss / num_batches,
@@ -157,23 +142,23 @@ if __name__ == "__main__":
     input_length = 64
     output_length = 1
     batch_size = 128
-    hidden_size = 2000
+    hidden_size = 1024
     hidden_type = "RNN"
     max_steps = 20
     lr = 1e-3
-    tau = 0.002
+    tau = 0.001
 
     # Training parameters
     num_epochs = 50000
-    train_batches = 20
+    train_batches = 10
     eval_batches = 100
-    eval_interval = 10
+    eval_interval = 100
     target_accuracy = 0.95
 
     # Curriculum parameters
     start_max_nonzeros = 1
     current_max_nonzeros = start_max_nonzeros
-    curriculum_acc = 0.90
+    curriculum_acc = 0.85
     should_eval = False
 
     print("=" * 80)
@@ -205,6 +190,9 @@ if __name__ == "__main__":
 
     criterion = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=10,
+        threshold=0.01, min_lr=1e-4)
 
     save_dir = Path("models")
     save_dir.mkdir(exist_ok=True)
@@ -227,22 +215,32 @@ if __name__ == "__main__":
 
         epoch_time += time.time() - epoch_start
 
+        if current_max_nonzeros == 64:
+            lr = 1e-4
+            optimizer = optim.Adam(model.parameters(), lr=lr)
+
         if epoch % 5 == 0:
-            print(f"Epoch   {epoch:4d} | "
+            print(f"\rEpoch   {epoch:4d} | "
                   f"Acc:    {train_metrics['accuracy']:.3f} | "
                   f"Loss:   {train_metrics['task_loss']:.4f} | "
                   f"Total:  {train_metrics['total_loss']:.4f} | "
                   f"Ponder: {train_metrics['ponder']:.2f} | "
                   f"Steps:  {train_metrics['steps']:.1f} | "
-                  f"Time:   {epoch_time:.2f}s")
+                  f"Time:   {epoch_time:.2f}s | "
+                  f"lr = {lr}", end="")
             epoch_time = 0
 
         if train_metrics['accuracy'] >= curriculum_acc and current_max_nonzeros < input_length:
             current_max_nonzeros = min(input_length, current_max_nonzeros + 1)
-            print(f"{'='*80}")
+            print(f"\n{'='*80}")
             print(f"Current Curriculum: max nonzeros = {current_max_nonzeros}")
             print(f"{'='*80}")
             should_eval = True
+
+            optimizer = optim.Adam(model.parameters(), lr=lr)
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='max', factor=0.5, patience=10,
+                threshold=0.01, min_lr=1e-4)
 
         # Periodic evaluation
         if (epoch + 1) % eval_interval == 0 or should_eval:
@@ -255,7 +253,7 @@ if __name__ == "__main__":
             )
             eval_time = time.time() - eval_start
 
-            print(f"{'='*80}")
+            print(f"\n{'='*80}")
             print(f"EVAL      {epoch:4d} | "
                   f"Test Acc: {eval_metrics['accuracy']:.3f} | "
                   f"Loss:     {eval_metrics['task_loss']:.4f} | "
@@ -283,7 +281,6 @@ if __name__ == "__main__":
                 }, save_path)
                 print(f"✓ Saved best model with accuracy: {best_accuracy:.3f}")
 
-            # Check if target reached
             if eval_metrics['accuracy'] >= target_accuracy:
                 print(f"\n{'='*80}")
                 print(f"✓ Target accuracy {target_accuracy:.3f} reached!")
@@ -292,8 +289,6 @@ if __name__ == "__main__":
                 print(f"{'='*80}")
                 break
 
-
-    # Check if we actually learned
     if best_accuracy < 0.7:
         print(f"\n{'='*80}")
         print(f"⚠ WARNING: Training did not converge!")

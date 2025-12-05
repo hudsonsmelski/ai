@@ -3,7 +3,7 @@ Reproducing NN models from papers, and fiddling around with new ones.
 
 I ran from a python venv in WSL2, so it kinda works on my machine.
 
-AGI has not been achieved internally, yet.
+AGI has been with us the whole time, in our own heads.
 
 ## ACT
 
@@ -13,13 +13,13 @@ Adaptive Computation Time recurrent neural network. It allows the network to spe
 
 ### Parity
 
-With a careful training curriculum I was able to get the network to reliably train for longer sequences by incrementing by 1 each time. So the vector starts out as mostly zeroes and the ACT net learns to classify with 90% accuracy, then it bumps it up to less and less empty (on average) until it learns to have 90% accuracy again. Filling only the start (or end) of the input vector makes it learn more slowly and is just bad for it's generalization. I definitely have not found the best tweaks to the hyper/curriculum parameters. It also learned to generalize really well, essentially learning the algorithm at ~83% accuracy on first EVAL. This reinforces the idea that a huge network and specialized input encodings are less important than a good architecture and training curriculum. This is the learning for input vectors of length 64, but I overkilled it for higher accuracy convergence. Takes forever.
+With a careful training curriculum I was able to get the network to reliably train for longer sequences by starting with 1 and incrementing by 1 each time. So the vector starts out as mostly zeroes and the ACT net learns to classify with 85% accuracy. Filling only the start (or end) of the input vector makes it learn more slowly and is just bad for it's generalization. This reinforces the idea that a huge network and specialized input encodings are less important than a good architecture and training curriculum. This is the learning for input vectors of length 64, but I overkilled it for faster accuracy convergence.
 TODO: figure out why it gets stuck at ~90% accuracy with 128 hidden size.
 
 ```
-> python act_parity_claude.py
-        Using device: cuda
-Start time: 2025-11-25 21:27:48.020907
+> python act_parity.py
+Using device: cuda
+Start time: 2025-11-30 14:27:02.041972
 ================================================================================
 Parity Task - ACT Training
 ================================================================================
@@ -27,7 +27,7 @@ Input length: 64
 Hidden size: 2000
 Hidden type: RNN
 Batch size: 128
-Learning rate: 0.0001
+Learning rate: 0.001
 Time penalty (tau): 0.002
 Max steps: 20
 Target accuracy: 0.95
@@ -37,12 +37,12 @@ Model Configuration:
   
 ...
 
-✓ Saved best model with accuracy: 0.950
+✓ Saved best model with accuracy: 0.958
 
 ================================================================================
 ✓ Target accuracy 0.950 reached!
-Final test accuracy: 0.950
-Total training time: 31.69 minutes
+Final test accuracy: 0.958
+Total training time: 3.05 minutes
 ================================================================================
 
 Running final evaluation...
@@ -50,13 +50,22 @@ Running final evaluation...
 ================================================================================
 FINAL RESULTS
 ================================================================================
-Test Accuracy:  0.950
-Test Loss:      0.0842
-Average Ponder: 2.63
-Average Steps:  1.6
-Best Accuracy:  0.950
-Total Time:     31.74 minutes
+Test Accuracy:  0.955
+Test Loss:      0.1476
+Average Ponder: 3.45
+Average Steps:  2.5
+Best Accuracy:  0.958
+Total Time:     3.11 minutes
 ================================================================================
+
+Testing on 5 examples:
+1. Ones: 15 | Target: 0 | Pred: 0 ✓ | Ponder: 3.00 | Steps: 2
+2. Ones: 19 | Target: 1 | Pred: 1 ✓ | Ponder: 4.00 | Steps: 3
+3. Ones:  5 | Target: 0 | Pred: 0 ✓ | Ponder: 3.00 | Steps: 2
+4. Ones: 19 | Target: 0 | Pred: 0 ✓ | Ponder: 4.00 | Steps: 3
+5. Ones: 24 | Target: 1 | Pred: 1 ✓ | Ponder: 4.00 | Steps: 3
+
+End time: 2025-11-30 14:30:09.699037
 ```
 
 ### Logic
@@ -153,7 +162,35 @@ End time: 2025-11-28 01:30:11.985215
 
 ### Addition
 
-TODO
+Hard to get the model to train and takes too long. Making sequences length 2 at minimum is pretty necessary for this task. I loaded the model from file a few times because of interruptions but that's why we save the best model.
+
+```
+> python act_addition_grok.py
+Using device: cuda
+Start time: 2025-12-03 12:54:17.087589
+================================================================================
+Addition Task - ACT Training
+================================================================================
+Input size: 50
+Output size: 66
+Hidden size: 1024
+Hidden type: LSTM
+Batch size: 32
+Max digits per number: 5
+Max sequence length: 5
+Learning rate: 0.0001
+Time penalty (tau): 0.01
+Max steps: 20
+Target sequence accuracy: 0.99
+================================================================================
+Loading model: models/act_LSTM_addition_best.pt
+Best sequence accuracy = 0.81875
+ Total parameters: 4,480,067
+  
+...
+
+
+```
 
 ## NTM
 

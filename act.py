@@ -22,7 +22,7 @@ class ACT(nn.Module):
 
         self.ilen = input_size + 1
 
-        # State transition Module
+        # Recurrent Network layer(s)
         if hidden_type == "RNN":
             self.state = nn.RNNCell(self.ilen, self.hidden_size, bias=True)
             self.st = 0
@@ -44,12 +44,10 @@ class ACT(nn.Module):
         seq_len, batch_size, _ = input.size()
         device = input.device
 
-        # Initial states
-        s_t = torch.zeros(batch_size, self.hidden_size, device=device)
-        c_t = torch.zeros(batch_size, self.hidden_size, device=device) if self.st == 1 else None
+        s_prev = torch.zeros(batch_size, self.hidden_size, device=device)
+        c_prev = torch.zeros(batch_size, self.hidden_size, device=device) if self.st == 1 else None
 
-        # Outputs
-        y_ts = []
+        y_ts = []  # Outputs
         p_ts = []  # Ponder costs
         n_ts = []  # Step counts
 
@@ -60,62 +58,78 @@ class ACT(nn.Module):
             s_t_accum = torch.zeros(batch_size, self.hidden_size, device=device)
             c_t_accum = torch.zeros(batch_size, self.hidden_size, device=device) if self.st == 1 else None
 
-            haltsum = torch.zeros(batch_size, device=device)
-            running = torch.ones(batch_size, device=device) # Mask: 1=Running, 0=Halted
+            #recurrent net state
+            s_n = s_prev
+            c_n = c_prev if self.st == 1 else None
 
-            total_steps = torch.zeros(batch_size, device=device)
-            total_remainder = torch.zeros(batch_size, device=device)
+            halting_sum = torch.zeros(batch_size, device=device)
+            n_steps = torch.zeros(batch_size, device=device)
+            remainders = torch.zeros(batch_size, device=device)
+            still_running = torch.ones(batch_size, dtype=torch.bool, device=device)
 
             for n in range(self.max_steps):
                 flag = torch.ones(batch_size, 1, device=device) if n == 0 else torch.zeros(batch_size, 1, device=device)
                 x_n = torch.cat([x_t, flag], dim=1)
 
-                if self.st == 0: # RNN
-                    s_n = self.state(x_n, s_t)
-                else: # LSTM
-                    s_n, c_n = self.state(x_n, (s_t, c_t))
+                if self.st == 0:  # RNN
+                    s_n = self.state(x_n, s_n)
+                else:  # LSTM
+                    s_n, c_n = self.state(x_n, (s_n, c_n))
 
-                h_n = torch.sigmoid(self.halt(s_n)).squeeze(-1)
-                new_sum = haltsum + h_n
-                stopping_now = (new_sum >= 1.0 - self.epsilon).float() * running
-                still_running = running - stopping_now
-
-                remainder = (1.0 - haltsum) * stopping_now
-                p_n = (h_n * still_running) + remainder
                 y_n = self.output(s_n)
 
+                # Halting unit
+                h_n = torch.sigmoid(self.halt(s_n)).squeeze(-1)
+                new_halting_sum = halting_sum + h_n
+
+                # Determine halting probability for this step
+                # If this step causes us to exceed threshold, use remainder
+                # Otherwise, use h_n
+                p_n = torch.where(
+                    new_halting_sum >= 1.0 - self.epsilon,
+                    1.0 - halting_sum,  # Remainder
+                    h_n  # Normal halting probability
+                )
+
+                # Only accumulate for samples still running
+                p_n = p_n * still_running.float()
+
+                # Accumulate outputs and states weighted by halting probability
                 y_t_accum = y_t_accum + (y_n * p_n.unsqueeze(1))
                 s_t_accum = s_t_accum + (s_n * p_n.unsqueeze(1))
                 if self.st == 1:
                     c_t_accum = c_t_accum + (c_n * p_n.unsqueeze(1))
 
-                haltsum = new_sum
+                # Update counters for samples still running
+                n_steps = n_steps + still_running.float()
 
-                total_steps = total_steps + running
-                total_remainder = total_remainder + remainder
+                # Track remainders (only for samples that halt this step)
+                halted_this_step = (new_halting_sum >= 1.0 - self.epsilon) & still_running
+                remainders = torch.where(
+                    halted_this_step,
+                    1.0 - halting_sum,
+                    remainders
+                )
 
-                # Update state for next step
-                s_t = s_n
-                if self.st == 1:
-                    c_t = c_n
+                # Update halting sum and running mask
+                halting_sum = new_halting_sum
+                still_running = still_running & (new_halting_sum < 1.0 - self.epsilon)
 
-                running = still_running
-
-                if running.sum() == 0:
+                # Early stopping if all samples have halted
+                if not still_running.any():
                     break
 
             y_ts.append(y_t_accum)
 
-            # Store ponder cost: N(t) + R(t)
-            # Note: total_steps tracks N(t), total_remainder tracks R(t)
-            rho_t = total_steps + total_remainder
+            # Ponder cost: N(t) + R(t)
+            rho_t = n_steps + remainders
             p_ts.append(rho_t)
-            n_ts.append(total_steps)
+            n_ts.append(n_steps)
 
-            # The accumulated state becomes the state for the next sequence step t+1
-            s_t = s_t_accum
+            # The accumulated state becomes the state for the next timestep
+            s_prev = s_t_accum
             if self.st == 1:
-                c_t = c_t_accum
+                c_prev = c_t_accum
 
         return torch.stack(y_ts), torch.stack(p_ts), torch.stack(n_ts)
 

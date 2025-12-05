@@ -254,7 +254,7 @@ if __name__ == "__main__":
     # Hyperparameters (Section 3.2)
     input_size = 102  # 2 bits + 10 gates * 10 one-hot
     output_size = 1   # Single binary output
-    hidden_size = 300  # LSTM with 128 cells (as per paper)
+    hidden_size = 128
     hidden_type = "LSTM"
     max_steps = 100
     lr = 1e-3
@@ -265,16 +265,16 @@ if __name__ == "__main__":
     max_seq_length = 10  # 1-10 vectors per sequence
     max_gates = 10  # 1-10 gates per vector
 
-    num_iterations = 100000  # 1M iterations / 16 threads ≈ 60K per thread
+    num_iterations = 100000
     train_batches = 10
     eval_batches = 20
     eval_interval = 100
-    target_sequence_accuracy = 0.95
+    target_sequence_accuracy = 0.99
 
     # Curriculum learning
     current_max_gates = 1
     current_max_seq_len = 1
-    curriculum_threshold = 0.90
+    curriculum_threshold = 0.85
 
     print("=" * 80)
     print("Logic Task - ACT Training")
@@ -309,7 +309,7 @@ if __name__ == "__main__":
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='max', factor=0.5, patience=10,
-        verbose=True, threshold=0.01, min_lr=1e-6)
+        threshold=0.01, min_lr=1e-4)
 
     save_dir = Path("models")
     save_dir.mkdir(exist_ok=True)
@@ -331,22 +331,25 @@ if __name__ == "__main__":
         )
         epoch_time += time.time() - epoch_start
 
+        if current_max_seq_len == max_seq_length and current_max_gates == max_gates:
+            scheduler.step(train_metrics['task_loss'])
+
         if iteration % 10 == 0:
-            print(f"Iter {iteration:6d} | "
+            print(f"\rIter {iteration:6d} | "
                   f"Acc: {train_metrics['accuracy']:.3f} | "
                   f"Seq Acc: {train_metrics['sequence_accuracy']:.3f} | "
                   f"Loss: {train_metrics['task_loss']:.4f} | "
                   f"Ponder: {train_metrics['ponder']:.2f} | "
                   f"Steps: {train_metrics['steps']:.1f} | "
                   f"Time: {epoch_time:.2f}s | "
-                  f"LR: {optimizer.param_groups[0]['lr']:.2e}")
+                  f"LR: {optimizer.param_groups[0]['lr']:.2e}", end = "")
             epoch_time = 0
 
         # Curriculum: gradually increase complexity
         if (train_metrics['sequence_accuracy'] >= curriculum_threshold
            and current_max_seq_len < max_seq_length):
             current_max_seq_len += 1
-            print(f"{'='*80}")
+            print(f"\n{'='*80}")
             print(f"Increasing difficulty: max_gates = {current_max_gates} | seq_length = {current_max_seq_len}")
             print(f"{'='*80}")
         if (train_metrics['accuracy'] >= curriculum_threshold
@@ -354,7 +357,7 @@ if __name__ == "__main__":
            and current_max_gates < max_gates):
                 current_max_gates += 1
                 current_max_seq_len = 1
-                print(f"{'='*80}")
+                print(f"\n{'='*80}")
                 print(f"Increasing difficulty: max_gates = {current_max_gates} | seq_length = {current_max_seq_len}")
                 print(f"{'='*80}")
                 should_eval = True
@@ -370,7 +373,7 @@ if __name__ == "__main__":
             )
             eval_time = time.time() - eval_start
 
-            print(f"{'='*80}")
+            print(f"\n{'='*80}")
             print(f"EVAL {iteration:6d} | "
                   f"Bit Acc: {eval_metrics['accuracy']:.3f} | "
                   f"Seq Acc: {eval_metrics['sequence_accuracy']:.3f} | "
@@ -380,7 +383,6 @@ if __name__ == "__main__":
                   f"Time: {eval_time:.2f}s | "
                   f"LR: {optimizer.param_groups[0]['lr']:.2e}")
             print(f"{'='*80}")
-            scheduler.step(eval_metrics['sequence_accuracy'])
 
             if eval_metrics['sequence_accuracy'] > best_sequence_accuracy:
                 best_sequence_accuracy = eval_metrics['sequence_accuracy']
