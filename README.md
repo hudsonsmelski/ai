@@ -162,34 +162,30 @@ End time: 2025-11-28 01:30:11.985215
 
 ### Addition
 
-Hard to get the model to train and takes too long. Making sequences length 2 at minimum is pretty necessary for this task. I loaded the model from file a few times because of interruptions but that's why we save the best model.
+Hard to get the model to train and takes too long. Making sequences length 2 at minimum is pretty necessary for this task. I loaded the model from file a few times because of interruptions but that's why we save the best model. It only got to 94% acc.
 
 ```
 > python act_addition_grok.py
 Using device: cuda
-Start time: 2025-12-03 12:54:17.087589
+Start time: 2025-12-07 21:59:00.337549
 ================================================================================
 Addition Task - ACT Training
 ================================================================================
+Loading model: models/act_LSTM_addition_best.pt
 Input size: 50
 Output size: 66
 Hidden size: 1024
 Hidden type: LSTM
+Best sequence accuracy = 0.94375
 Batch size: 32
 Max digits per number: 5
 Max sequence length: 5
 Learning rate: 0.0001
-Time penalty (tau): 0.01
+Time penalty (tau): 0.001
 Max steps: 20
-Target sequence accuracy: 0.99
+Target sequence accuracy: 0.95
 ================================================================================
-Loading model: models/act_LSTM_addition_best.pt
-Best sequence accuracy = 0.81875
  Total parameters: 4,480,067
-  
-...
-
-
 ```
 
 ## NTM

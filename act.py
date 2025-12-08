@@ -8,10 +8,11 @@ Implementation by Hudson Andrew Smelski
 import torch
 import torch.nn as nn
 import torch.nn.init as init
+import torch.nn.functional as F
 
 class ACT(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, hidden_type="RNN",
-                 max_steps=100, tau=0.01, epsilon=0.01):
+                 max_steps=100, tau=0.01, epsilon=0.01, logit_smooth=False, dim1 = None, dim2 = None):
         super(ACT, self).__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -19,6 +20,9 @@ class ACT(nn.Module):
         self.max_steps = max_steps
         self.tau = tau
         self.epsilon = epsilon
+        self.logit_smooth = logit_smooth
+        self.dim1 = dim1
+        self.dim2 = dim2
 
         self.ilen = input_size + 1
 
@@ -37,8 +41,6 @@ class ACT(nn.Module):
 
     def _init_weights(self):
         init.constant_(self.halt.bias, 1.0)
-        init.xavier_uniform_(self.halt.weight)
-        init.xavier_uniform_(self.output.weight)
 
     def forward(self, input):
         seq_len, batch_size, _ = input.size()
@@ -76,7 +78,15 @@ class ACT(nn.Module):
                 else:  # LSTM
                     s_n, c_n = self.state(x_n, (s_n, c_n))
 
-                y_n = self.output(s_n)
+                if self.logit_smooth == False:
+                    y_n = self.output(s_n)
+                else:
+                    y_n_logits = self.output(s_n)  # (batch, output_size)
+
+                    # Reshape to (batch, num_digits, num_classes), apply softmax, reshape back
+                    y_n_logits_reshaped = y_n_logits.view(batch_size, self.dim1, self.dim2)
+                    y_n_probs = F.softmax(y_n_logits_reshaped, dim=-1)  # Softmax over classes
+                    y_n = y_n_probs.view(batch_size, self.output_size)  # Flatten back to (batch, 66)
 
                 # Halting unit
                 h_n = torch.sigmoid(self.halt(s_n)).squeeze(-1)
@@ -85,11 +95,7 @@ class ACT(nn.Module):
                 # Determine halting probability for this step
                 # If this step causes us to exceed threshold, use remainder
                 # Otherwise, use h_n
-                p_n = torch.where(
-                    new_halting_sum >= 1.0 - self.epsilon,
-                    1.0 - halting_sum,  # Remainder
-                    h_n  # Normal halting probability
-                )
+                p_n = torch.where(new_halting_sum >= 1.0 - self.epsilon, 1.0 - halting_sum, h_n)
 
                 # Only accumulate for samples still running
                 p_n = p_n * still_running.float()
@@ -105,11 +111,7 @@ class ACT(nn.Module):
 
                 # Track remainders (only for samples that halt this step)
                 halted_this_step = (new_halting_sum >= 1.0 - self.epsilon) & still_running
-                remainders = torch.where(
-                    halted_this_step,
-                    1.0 - halting_sum,
-                    remainders
-                )
+                remainders = torch.where(halted_this_step, 1.0 - halting_sum, remainders)
 
                 # Update halting sum and running mask
                 halting_sum = new_halting_sum
@@ -119,7 +121,14 @@ class ACT(nn.Module):
                 if not still_running.any():
                     break
 
-            y_ts.append(y_t_accum)
+            if self.logit_smooth == False:
+                y_ts.append(y_t_accum)
+            else:
+                y_t_accum_reshaped = y_t_accum.view(batch_size, self.dim1, self.dim2)
+                y_t_logits = torch.log(y_t_accum_reshaped + 1e-10)
+                y_t_logits_flat = y_t_logits.view(batch_size, self.output_size)
+
+                y_ts.append(y_t_logits_flat)
 
             # Ponder cost: N(t) + R(t)
             rho_t = n_steps + remainders
