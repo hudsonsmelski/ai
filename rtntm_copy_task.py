@@ -1,7 +1,4 @@
-# ================================================================
-# IMPROVED TRAINING SCRIPT FOR TNTM ON THE COPY TASK
-# ================================================================
-#
+# Training script for the RTNTM on 4.1 Copy task from the NTM paper
 # Hudson Andrew Smelski
 
 import os
@@ -10,6 +7,7 @@ import torch.nn.functional as F
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import time
+import datetime
 from collections import deque
 
 from rtntm import *
@@ -18,27 +16,18 @@ def ensure_dir(path):
     if not os.path.exists(path):
         os.makedirs(path)
 
-
 def generate_copy_batch(batch_size, seq_len, vocab_size, device):
-    """
-    Creates a batch for the copy task:
-    Input:  random sequence + delimiter token + blank tokens for output
-    Target: original sequence
-    """
     seq = torch.randint(0, vocab_size - 1, (seq_len, batch_size), device=device)
     delimiter = (vocab_size - 1) * torch.ones(1, batch_size, dtype=torch.long, device=device)
-    # Add blank tokens for model to output into
     blanks = torch.zeros(seq_len, batch_size, dtype=torch.long, device=device)
     x = torch.cat([seq, delimiter, blanks], dim=0)  # [2*seq_len + 1, batch]
     y = seq.clone()
-    return x, y
-
+    return x, y #[int], [int]
 
 def evaluate_copy_accuracy(logits, targets):
     """
     logits: [seq_len * batch, vocab]
     targets: [seq_len * batch]
-    Returns percentage of correctly predicted tokens.
     """
     preds = torch.argmax(logits, dim=-1)
     correct = (preds == targets).float().mean().item()
@@ -63,7 +52,7 @@ def train_copy_task_until_converged(
 
     ensure_dir(model_dir)
     optimizer = Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=50)
     model.train()
 
     # Curriculum learning
@@ -79,9 +68,6 @@ def train_copy_task_until_converged(
     start_time = time.time()
 
     for it in range(1, max_iters + 1):
-        # ----------------------------
-        # Generate batch
-        # ----------------------------
         x, y = generate_copy_batch(batch_size, current_seq_len, vocab_size, device)
         state = model.init_state(batch_size=batch_size, device=device)
 
@@ -93,10 +79,10 @@ def train_copy_task_until_converged(
             logits, state = model.step(x[t], state)
             logits_all.append(logits.unsqueeze(0))
 
-        logits_all = torch.cat(logits_all, dim=0)                     # [2*seq_len+1, batch, vocab]
-        pred_logits = logits_all[-(current_seq_len):, :, :]           # last seq_len predictions
-        pred_logits = pred_logits.reshape(-1, vocab_size)             # [seq_len*batch, vocab]
-        targets = y.reshape(-1)                                        # [seq_len*batch]
+        logits_all = torch.cat(logits_all, dim=0)           # [2*seq_len+1, batch, vocab]
+        pred_logits = logits_all[-(current_seq_len):, :, :] # last seq_len predictions
+        pred_logits = pred_logits.reshape(-1, vocab_size)   # [seq_len*batch, vocab]
+        targets = y.reshape(-1)                             # [seq_len*batch]
 
         # ----------------------------
         # Loss + backward with gradient clipping
@@ -169,7 +155,7 @@ def train_copy_task_until_converged(
 
             print(f"[Iter {it:5d}] Loss={loss_val:.4f} (avg={avg_loss:.4f}), Acc={acc*100:.2f}%, "
                   f"Len={current_seq_len}, GradNorm={grad_norm:.2f}, LR={optimizer.param_groups[0]['lr']:.2e}, "
-                  f"Speed={iter_per_sec:.1f} it/s")
+                  f"Speed={iter_per_sec:.1f} it/s, ", end="")
 
             # Show prediction example (first batch item)
             with torch.no_grad():
@@ -177,9 +163,8 @@ def train_copy_task_until_converged(
                 tgt_idxs = targets[:current_seq_len].cpu().tolist()
                 pred_seq = ''.join(idx_to_char.get(i, '?') for i in pred_idxs)
                 tgt_seq = ''.join(idx_to_char.get(i, '?') for i in tgt_idxs)
-                print(f"  Target:  {repr(tgt_seq)}")
-                print(f"  Predict: {repr(pred_seq)}")
-                print()
+                print(f"  Target:  {repr(tgt_seq)} | "
+                      f"  Predict: {repr(pred_seq)}")
 
         # ----------------------------
         # Save checkpoint periodically
@@ -237,6 +222,9 @@ def train_copy_task_until_converged(
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    print(f"Start time: {datetime.datetime.now()}")
+
     print("="*60)
     print("TNTM COPY TASK TRAINING")
     print("="*60)
@@ -245,10 +233,10 @@ if __name__ == "__main__":
 
     # Model hyperparameters
     memory_N = 25
-    memory_M = 97  # Match d_model
+    memory_M = vocab_size  # must be at least vocab size
     d_model = 100
     n_heads = 4
-    read_heads = 2
+    read_heads = 1
     write_heads = 1
     shift_K = 3
 
@@ -271,11 +259,12 @@ if __name__ == "__main__":
     print(f"  Total parameters: {total_params:,}")
     print()
 
+    start_time = time.time()
     final_path = train_copy_task_until_converged(
         model,
         device=device,
         max_iters=50000,
-        seq_len_start=4,
+        seq_len_start=1,
         seq_len_max=20,
         batch_size=8,
         lr=1e-3,
@@ -290,4 +279,7 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("TRAINING FINISHED")
     print(f"Final model: {final_path}")
+    print(f"Time: {(time.time()-start_time)/60:.2f} min")
     print("="*60)
+
+    print(f"\nEnd time: {datetime.datetime.now()}")

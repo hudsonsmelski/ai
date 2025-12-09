@@ -4,13 +4,16 @@
      Greg Wayne, gregwayne@google.com
      Ivo Danihelka, danihelka@google.com
 
-Refactored Transformer-NTM (TNTM) - step-based & recurrent controller
-- Step API: state = tntm.init_state(batch, device); logits, state = tntm.step(x_t, state)
-- Forward API: logits_seq, final_state = tntm.forward(token_seq, state=None)
-- Implements content + location addressing per Graves (NTM), with circular shift.
-- Controller is a recurrent Transformer-like single-layer cell with KV cache.
-
 Hudson Andrew Smelski
+
+RTNTM - Recurrent Transformer NTM with BOUNDED internal memory
+Wide input architecture: concatenates token embeddings with read vectors
+
+Key design:
+- Controller input = [token_emb, read_vec_1, ..., read_vec_RH]  (wide)
+- Projected to d_model for attention (compression bottleneck)
+- KV cache stores only d_model compressed states (bounded memory)
+- Forces model to use external NTM memory for data storage
 """
 
 import string
@@ -30,99 +33,135 @@ idx_to_char = {idx: char for char, idx in char_to_idx.items()}
 
 
 # ---------------------------
-# Positional encoding (optional usage)
+# Recurrent Transformer Controller with WIDE INPUT
 # ---------------------------
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
-        position = torch.arange(max_len).unsqueeze(1).float()
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe = torch.zeros(max_len, 1, d_model)
-        pe[:, 0, 0::2] = torch.sin(position * div_term)
-        pe[:, 0, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x: torch.Tensor):
-        # x: [seq_len, batch, d_model]
-        x = x + self.pe[:x.size(0)]
-        return self.dropout(x)
-
-
-# ---------------------------
-# Recurrent Transformer-style controller
-# ---------------------------
-class RecurrentTransformerController(nn.Module):
+class WideInputRecurrentTransformerController(nn.Module):
     """
-    A single-layer Transformer-style controller that is recurrent via a KV cache.
-    forward_step(token_emb, read_input, state) -> (out_vec, new_state)
-    - token_emb: [batch, d_model]
-    - read_input: [batch, read_input_dim]  (we'll project into d_model and add)
-    - state['kv_cache']: Optional tensor [past_len, batch, d_model]
+    Transformer controller that takes WIDE concatenated input but stores
+    compressed state in bounded KV cache.
+
+    Input: [token_emb, read_vectors] → wide_input_dim
+    Compressed to: d_model for attention and storage
+    KV cache: bounded to window_size tokens of d_model
     """
-    def __init__(self, d_model: int, n_heads: int, read_input_dim: int, dropout: float = 0.1):
+    def __init__(self,
+                 d_model: int,
+                 wide_input_dim: int,  # d_model + RH * M
+                 n_heads: int,
+                 window_size: int = 8,
+                 dropout: float = 0.1,
+                 use_summary: bool = False):
         super().__init__()
         self.d_model = d_model
+        self.wide_input_dim = wide_input_dim
         self.n_heads = n_heads
-        # project read vectors into d_model and combine with token embedding
-        self.read_proj = nn.Linear(read_input_dim, d_model)
-        self.input_proj = nn.Linear(d_model, d_model)
+        self.window_size = window_size
+        self.use_summary = use_summary
 
-        # MultiheadAttention expects [seq_len, batch, d_model]; we use seq_len=1 per step
-        self.mha = nn.MultiheadAttention(embed_dim=d_model, num_heads=n_heads, dropout=dropout, batch_first=False)
+        # Project wide input to d_model (compression bottleneck)
+        self.input_proj = nn.Linear(wide_input_dim, d_model)
+        nn.init.xavier_uniform_(self.input_proj.weight)
+        nn.init.zeros_(self.input_proj.bias)
 
-        # Feed-forward with layer norms (Transformer-like)
+        # Multi-head attention (operates in d_model space)
+        self.mha = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=n_heads,
+            dropout=dropout,
+            batch_first=False
+        )
+
+        # Feed-forward network
         self.ln1 = nn.LayerNorm(d_model)
         self.ff = nn.Sequential(
             nn.Linear(d_model, d_model * 4),
-            nn.ReLU(),
-            nn.Linear(d_model * 4, d_model)
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model * 4, d_model),
+            nn.Dropout(dropout)
         )
         self.ln2 = nn.LayerNorm(d_model)
 
-    def forward_step(self, token_emb: torch.Tensor, read_input: torch.Tensor, ctl_state: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """
-        token_emb: [batch, d_model]
-        read_input: [batch, read_input_dim]
-        ctl_state: dict possibly containing 'kv_cache' (tensor [past_len, batch, d_model]) and 'max_cache_len'
-        returns: out [batch, d_model], new_ctl_state
-        """
-        batch = token_emb.shape[0]
-        device = token_emb.device
+        # Optional: compress evicted context into summary
+        if self.use_summary:
+            self.summary_compress = nn.Linear(d_model * 2, d_model)
+            self.summary_gate = nn.Linear(d_model * 2, 1)
 
-        # project and combine
-        read_p = self.read_proj(read_input)  # [batch, d_model]
-        x = token_emb + read_p
-        x = self.input_proj(x)
+    def forward_step(self,
+                     wide_input: torch.Tensor,  # [batch, wide_input_dim]
+                     ctl_state: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """
+        Process one time step with wide input
 
-        # build q, k, v
+        wide_input: [batch, wide_input_dim] = concatenated [token_emb, read_vecs]
+        ctl_state: dict with 'kv_cache' and optional 'summary'
+
+        Returns: out [batch, d_model], new_ctl_state
+        """
+        batch = wide_input.shape[0]
+        device = wide_input.device
+
+        # PROJECT wide input to d_model (BOTTLENECK)
+        x = self.input_proj(wide_input)  # [batch, d_model]
+
+        # This compressed x becomes our query
         q = x.unsqueeze(0)  # [1, batch, d_model]
-        kv_cache: Optional[torch.Tensor] = ctl_state.get('kv_cache', None)  # [past_len, batch, d_model] or None
 
+        # Get KV cache (bounded to window_size)
+        kv_cache: Optional[torch.Tensor] = ctl_state.get('kv_cache', None)
+
+        # Build key and value from cache + current query
         if kv_cache is not None:
-            k = torch.cat([kv_cache, q], dim=0)  # [past_len+1, batch, d_model]
-            v = torch.cat([kv_cache, q], dim=0)
+            k = torch.cat([kv_cache, q], dim=0)  # [cache_len+1, batch, d_model]
+            v = k  # Self-attention: v = k
+
+            # ENFORCE WINDOW SIZE
+            if k.size(0) > self.window_size:
+                if self.use_summary:
+                    # Compress evicted tokens
+                    evicted = k[:-self.window_size]
+                    evicted_mean = evicted.mean(dim=0)  # [batch, d_model]
+
+                    old_summary = ctl_state.get('summary',
+                                                torch.zeros(batch, self.d_model, device=device))
+
+                    gate_input = torch.cat([old_summary, evicted_mean], dim=-1)
+                    gate = torch.sigmoid(self.summary_gate(gate_input))
+
+                    new_summary = self.summary_compress(gate_input)
+                    new_summary = gate * old_summary + (1 - gate) * new_summary
+                    ctl_state['summary'] = new_summary
+
+                # Truncate to window
+                k = k[-self.window_size:]
+                v = v[-self.window_size:]
         else:
             k = q
             v = q
 
-        # MultiheadAttention: query=q, key=k, value=v
-        attn_out, _ = self.mha(q, k, v, need_weights=False)  # attn_out: [1, batch, d_model]
+        # Multi-head attention
+        attn_out, attn_weights = self.mha(q, k, v, need_weights=True)  # [1, batch, d_model]
         attn_out = attn_out.squeeze(0)  # [batch, d_model]
 
-        # residual + norms + ff
+        # Optional: add summary contribution
+        if self.use_summary and 'summary' in ctl_state:
+            summary = ctl_state['summary']
+            attn_out = attn_out + 0.1 * summary
+
+        # Residual + LayerNorm
         x2 = self.ln1(x + attn_out)
+
+        # Feed-forward + residual
         ff_out = self.ff(x2)
         out = self.ln2(x2 + ff_out)
 
-        # update kv_cache: append current q (detach to prevent huge graphs for long runs if desired)
-        max_cache_len = ctl_state.get('max_cache_len', 256)
-        if kv_cache is None:
-            new_cache = q.detach().clone()
-        else:
-            new_cache = torch.cat([kv_cache, q.detach().clone()], dim=0)
-            if new_cache.size(0) > max_cache_len:
-                new_cache = new_cache[-max_cache_len:]
+        # Update KV cache: store compressed state (q)
+        new_cache = q.detach().clone() if kv_cache is None else \
+                    torch.cat([kv_cache, q.detach().clone()], dim=0)
+
+        # Enforce window size
+        if new_cache.size(0) > self.window_size:
+            new_cache = new_cache[-self.window_size:]
 
         new_state = dict(ctl_state)
         new_state['kv_cache'] = new_cache
@@ -131,7 +170,7 @@ class RecurrentTransformerController(nn.Module):
 
 
 # ---------------------------
-# TNTM main model (refactor)
+# RTNTM with wide input architecture
 # ---------------------------
 class RTNTM(nn.Module):
     def __init__(self,
@@ -139,21 +178,25 @@ class RTNTM(nn.Module):
                  d_model: int,
                  memory_N: int,
                  memory_M: int,
-                 n_heads: int = 8,
-                 n_layers: int = 1,  # controller depth optional (we implement single-layer recurrent cell)
+                 n_heads: int = 4,
+                 controller_window: int = 8,
                  read_heads: int = 1,
                  write_heads: int = 1,
-                 shift_width: int = 3):
+                 shift_width: int = 3,
+                 use_summary: bool = False,
+                 dropout: float = 0.1):
         """
-        d_model: Transformer dimension
-        memory_N: number of memory rows (locations)
-        memory_M: width of each memory row
-        read_heads / write_heads: integers
-        shift_width: odd integer (e.g. 3) for allowed relative shifts (-1,0,1)
+        RTNTM with wide input controller
+
+        Key parameters:
+        - d_model: controller internal dimension (and token embedding size)
+        - memory_M: width of each memory row (can differ from d_model)
+        - controller_window: max KV cache length (forces external memory use)
         """
         super().__init__()
 
-        assert shift_width % 2 == 1, "shift_width must be odd (e.g. 3)"
+        assert shift_width % 2 == 1, "shift_width must be odd"
+
         self.vocab_size = vocab_size
         self.d_model = d_model
         self.N = memory_N
@@ -162,142 +205,143 @@ class RTNTM(nn.Module):
         self.WH = write_heads
         self.shift_K = shift_width
         self.half_shift = shift_width // 2
+        self.controller_window = controller_window
 
-        # token embedding
+        # Token embedding (to d_model)
         self.embedding = nn.Embedding(vocab_size, d_model)
+        nn.init.normal_(self.embedding.weight, mean=0.0, std=0.02)
 
-        # controller: read inputs concatenated (RH * M) projected inside controller
-        self.controller = RecurrentTransformerController(d_model=d_model, n_heads=n_heads, read_input_dim=self.RH * self.M)
+        # Controller with WIDE input: [d_model + RH * M]
+        wide_input_dim = d_model + self.RH * self.M
+        self.controller = WideInputRecurrentTransformerController(
+            d_model=d_model,
+            wide_input_dim=wide_input_dim,
+            n_heads=n_heads,
+            window_size=controller_window,
+            dropout=dropout,
+            use_summary=use_summary
+        )
 
-        # output head: maps controller output -> token logits
+        # Output head: d_model → vocab_size
         self.token_head = nn.Linear(d_model, vocab_size)
+        nn.init.xavier_uniform_(self.token_head.weight)
 
-        # addressing parameter heads (emit raw params; activations applied downstream)
-        # read: per head -> key(M) + beta(1) + gate(1) + shift(K) + gamma(1)
+        # Read head parameters: key(M) + beta(1) + gate(1) + shift(K) + gamma(1)
         self.read_param_len = self.M + 1 + 1 + self.shift_K + 1
         self.read_head = nn.Linear(d_model, self.RH * self.read_param_len)
 
-        # write: key(M) + beta(1) + gate(1) + shift(K) + gamma(1) + erase(M) + add(M)
+        # Write head parameters: key(M) + beta(1) + gate(1) + shift(K) + gamma(1) + erase(M) + add(M)
         self.write_param_len = self.M + 1 + 1 + self.shift_K + 1 + self.M + self.M
         self.write_head = nn.Linear(d_model, self.WH * self.write_param_len)
 
-        # initial small memory buffer
-        self.register_buffer('memory_initial', torch.randn(self.N, self.M) * 0.01)
+        # Initialize memory to zeros
+        self.register_buffer('memory_initial', torch.zeros(self.N, self.M))
 
-    # ---------------------------
-    # Utility: initialize per-batch state
-    # ---------------------------
     def init_state(self, batch_size: int = 1, device: Optional[torch.device] = None) -> Dict[str, Any]:
+        """Initialize clean state for new sequence"""
         if device is None:
-            device = torch.device('cpu')
+            device = next(self.parameters()).device
+
         state: Dict[str, Any] = {}
-        # memory: [batch, N, M]
-        state['memory'] = self.memory_initial.unsqueeze(0).repeat(batch_size, 1, 1).to(device).clone()
-        # read/write weights: normalized; shapes [batch, RH, N] and [batch, WH, N]
-        state['read_w'] = F.softmax(torch.randn(batch_size, self.RH, self.N, device=device), dim=-1)
-        state['write_w'] = F.softmax(torch.randn(batch_size, self.WH, self.N, device=device), dim=-1)
-        # controller state
-        state['controller_state'] = {'kv_cache': None, 'max_cache_len': 256}
+
+        # Memory: [batch, N, M]
+        state['memory'] = self.memory_initial.unsqueeze(0).repeat(batch_size, 1, 1).clone()
+
+        # Read/write weights: [batch, RH/WH, N] - focused on location 0
+        read_w = torch.zeros(batch_size, self.RH, self.N, device=device)
+        read_w[:, :, 0] = 1.0
+        state['read_w'] = read_w
+
+        write_w = torch.zeros(batch_size, self.WH, self.N, device=device)
+        write_w[:, :, 0] = 1.0
+        state['write_w'] = write_w
+
+        # Controller state: empty cache
+        state['controller_state'] = {
+            'kv_cache': None,
+            'summary': None if not self.controller.use_summary else
+                      torch.zeros(batch_size, self.d_model, device=device)
+        }
+
         return state
 
-    # ---------------------------
-    # Addressing: vectorized batch implementation
-    # params: tuple of tensors (key, beta, gate, shift, gamma) each with leading batch dim
-    # prev_w: [batch, N]
-    # memory: [batch, N, M]
-    # returns: wt [batch, N]
-    # ---------------------------
-    def addressing(self, key: torch.Tensor, beta: torch.Tensor, gate: torch.Tensor, shift: torch.Tensor, gamma: torch.Tensor,
-                   prev_w: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
+    def addressing(self, key, beta, gate, shift, gamma, prev_w, memory) -> torch.Tensor:
         """
-        key: [batch, M]
-        beta: [batch, 1]
-        gate: [batch, 1]
-        shift: [batch, K]
-        gamma: [batch, 1]
-        prev_w: [batch, N]
-        memory: [batch, N, M]
-        returns wt: [batch, N]
+        NTM addressing: content-based + location-based
+        Implements equations from Graves et al. 2014
         """
         eps = 1e-12
-        batch = memory.size(0)
-        N = memory.size(1)
 
-        # 1) content addressing (cosine similarity)
-        # compute cosine similarity between key and each memory row
-        # memory: [batch, N, M], key: [batch, M] -> produce [batch, N]
+        # 1) Content addressing (cosine similarity)
         key_norm = key / (key.norm(dim=-1, keepdim=True) + eps)
         mem_norm = memory / (memory.norm(dim=-1, keepdim=True) + eps)
-        cos_sim = torch.bmm(mem_norm, key_norm.unsqueeze(-1)).squeeze(-1)  # [batch, N]
+        cos_sim = torch.bmm(mem_norm, key_norm.unsqueeze(-1)).squeeze(-1)
 
-        beta_pos = F.softplus(beta).squeeze(-1)  # [batch]
-        wc = F.softmax(beta_pos.unsqueeze(-1) * cos_sim, dim=-1)  # [batch, N]
+        beta_pos = F.softplus(beta).squeeze(-1)
+        wc = F.softmax(beta_pos.unsqueeze(-1) * cos_sim, dim=-1)
 
-        # 2) interpolation gate
-        g = torch.sigmoid(gate).squeeze(-1)  # [batch]
-        wg = g.unsqueeze(-1) * wc + (1.0 - g).unsqueeze(-1) * prev_w  # [batch, N]
+        # 2) Interpolation
+        g = torch.sigmoid(gate).squeeze(-1)
+        wg = g.unsqueeze(-1) * wc + (1.0 - g).unsqueeze(-1) * prev_w
 
-        # 3) circular convolutional shift
-        s = F.softmax(shift, dim=-1)  # [batch, K]
-        # implement as weighted sum of rolled wg
-        # shifts correspond to [-half_shift, ..., 0, ..., +half_shift]
+        # 3) Convolutional shift
+        s = F.softmax(shift, dim=-1)
         shifted = torch.zeros_like(wg)
         for k in range(self.shift_K):
             shift_amount = k - self.half_shift
             rolled = torch.roll(wg, shifts=shift_amount, dims=-1)
             shifted = shifted + s[:, k].unsqueeze(-1) * rolled
 
-        # 4) sharpening
-        gamma_p = 1.0 + F.softplus(gamma).squeeze(-1)  # [batch]
-        wt = shifted.clamp(min=eps) ** gamma_p.unsqueeze(-1)
+        # 4) Sharpening
+        gamma_p = 1.0 + F.softplus(gamma).squeeze(-1)
+        wt = (shifted + eps) ** gamma_p.unsqueeze(-1)
         wt = wt / (wt.sum(dim=-1, keepdim=True) + eps)
 
         return wt
 
-    # ---------------------------
-    # Single time-step update
-    # x_t: [batch] token indices (long) OR [batch, d_model] embeddings precomputed
-    # state: dict with memory (batch,N,M), read_w (batch,RH,N), write_w (batch,WH,N), controller_state
-    # returns: logits [batch, vocab], new_state
-    # ---------------------------
     def step(self, x_t: torch.Tensor, state: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
-        Execute a single step of the NTM.
-        x_t: [batch] long tensor of token indices
-        state: dictionary (see init_state)
+        Single time step with wide input architecture
+
+        x_t: [batch] token indices
+        state: dict with memory, weights, controller_state
+        returns: logits [batch, vocab_size], new_state
         """
-        batch = x_t.shape[0] if x_t.dim() > 0 else 1
+        batch = x_t.shape[0]
         device = x_t.device
 
-        # 1) get token embedding
-        emb = self.embedding(x_t)  # [batch, d_model]
+        # 1) Embed input token
+        token_emb = self.embedding(x_t)  # [batch, d_model]
 
-        # 2) compute read vectors from memory (batched)
+        # 2) Read from memory using current read weights
         memory = state['memory']  # [batch, N, M]
         read_w = state['read_w']  # [batch, RH, N]
+
         read_vecs = []
         for h in range(self.RH):
-            # w: [batch, N], memory: [batch, N, M] -> read: [batch, M]
             w = read_w[:, h, :].unsqueeze(1)  # [batch, 1, N]
             r = torch.bmm(w, memory).squeeze(1)  # [batch, M]
             read_vecs.append(r)
-        # concatenate reads: [batch, RH * M]
-        read_concat = torch.cat(read_vecs, dim=-1) if self.RH > 1 else read_vecs[0]
+        read_concat = torch.cat(read_vecs, dim=-1)  # [batch, RH * M]
 
-        # 3) controller step: provide embedding + read_concat
+        # 3) WIDE INPUT: concatenate token embedding with read vectors
+        wide_input = torch.cat([token_emb, read_concat], dim=-1)  # [batch, d_model + RH*M]
+
+        # 4) Controller forward (compresses to d_model internally)
         controller_state = state['controller_state']
-        controller_out, new_controller_state = self.controller.forward_step(emb, read_concat, controller_state)  # out: [batch, d_model]
+        controller_out, new_controller_state = self.controller.forward_step(wide_input, controller_state)
+        # controller_out: [batch, d_model]
 
-        # 4) produce logits
+        # 5) Generate output logits
         logits = self.token_head(controller_out)  # [batch, vocab_size]
 
-        # 5) produce read parameters and update read weights
+        # 6) Generate read parameters and update read weights
         read_params = self.read_head(controller_out)  # [batch, RH * read_param_len]
-        read_params = read_params.view(batch, self.RH, self.read_param_len)  # [batch, RH, L]
+        read_params = read_params.view(batch, self.RH, self.read_param_len)
+
         new_read_w = []
         for h in range(self.RH):
-            rp = read_params[:, h, :]  # [batch, read_param_len]
-            # split: key(M), beta(1), gate(1), shift(K), gamma(1)
+            rp = read_params[:, h, :]
             idx = 0
             key = rp[:, idx:idx + self.M]; idx += self.M
             beta = rp[:, idx:idx + 1]; idx += 1
@@ -305,17 +349,18 @@ class RTNTM(nn.Module):
             shift = rp[:, idx:idx + self.shift_K]; idx += self.shift_K
             gamma = rp[:, idx:idx + 1]; idx += 1
 
-            prev_w = state['read_w'][:, h, :]  # [batch, N]
-            wt = self.addressing(key, beta, gate, shift, gamma, prev_w, memory)  # [batch, N]
+            prev_w = state['read_w'][:, h, :]
+            wt = self.addressing(key, beta, gate, shift, gamma, prev_w, memory)
             new_read_w.append(wt)
-        # new_read_w: list of [batch, N] -> stack to [batch, RH, N]
+
         state['read_w'] = torch.stack(new_read_w, dim=1)
 
-        # 6) produce write parameters and update memory
+        # 7) Generate write parameters and update memory
         write_params = self.write_head(controller_out)  # [batch, WH * write_param_len]
-        write_params = write_params.view(batch, self.WH, self.write_param_len)  # [batch, WH, L]
+        write_params = write_params.view(batch, self.WH, self.write_param_len)
+
         mem = memory
-        new_write_w_list = []
+        new_write_w = []
         for h in range(self.WH):
             wp = write_params[:, h, :]
             idx = 0
@@ -327,143 +372,165 @@ class RTNTM(nn.Module):
             erase = wp[:, idx:idx + self.M]; idx += self.M
             add = wp[:, idx:idx + self.M]; idx += self.M
 
-            prev_w = state['write_w'][:, h, :]  # [batch, N]
-            wt = self.addressing(key, beta, gate, shift, gamma, prev_w, mem)  # [batch, N]
-            new_write_w_list.append(wt)
+            prev_w = state['write_w'][:, h, :]
+            wt = self.addressing(key, beta, gate, shift, gamma, prev_w, mem)
+            new_write_w.append(wt)
 
-            # Erase: erase vector in (0,1)
+            # Erase and add operations
             erase_v = torch.sigmoid(erase)  # [batch, M]
-            # Add: bound with tanh and small scale for stability
-            add_v = torch.tanh(add) * 0.1  # [batch, M]
+            add_v = torch.tanh(add)  # [batch, M]
 
-            # outer products to apply per-location effects
-            # wt: [batch, N], erase_v: [batch, M] -> erase_matrix: [batch, N, M]
             erase_matrix = wt.unsqueeze(-1) * erase_v.unsqueeze(1)  # [batch, N, M]
             mem = mem * (1.0 - erase_matrix)
 
             add_matrix = wt.unsqueeze(-1) * add_v.unsqueeze(1)  # [batch, N, M]
             mem = mem + add_matrix
 
-        # update state memory and write_w
         state['memory'] = mem
-        state['write_w'] = torch.stack(new_write_w_list, dim=1)  # [batch, WH, N]
-
-        # update controller state
+        state['write_w'] = torch.stack(new_write_w, dim=1)
         state['controller_state'] = new_controller_state
 
         return logits, state
 
-    # ---------------------------
-    # Forward wrapper: process a full token sequence (seq_len, batch)
-    # Returns logits per step optionally, and final state
-    # ---------------------------
-    def forward(self, token_seq: torch.Tensor, state: Optional[Dict[str, Any]] = None, return_all_logits: bool = False):
+    def forward(self,
+                token_seq: torch.Tensor,
+                state: Optional[Dict[str, Any]] = None,
+                return_all_logits: bool = False):
         """
-        token_seq: [seq_len, batch] long tensor of token indices
-        If state is None, initialize with batch=token_seq.shape[1]
+        Process full token sequence
+
+        token_seq: [seq_len, batch] long tensor
+        returns: logits (all or last), final_state
         """
         seq_len, batch = token_seq.shape
         device = token_seq.device
+
         if state is None:
             state = self.init_state(batch_size=batch, device=device)
 
         logits_all = []
         for t in range(seq_len):
-            x_t = token_seq[t]  # [batch]
+            x_t = token_seq[t]
             logits, state = self.step(x_t, state)
             if return_all_logits:
                 logits_all.append(logits.unsqueeze(0))
 
         if return_all_logits:
-            logits_all = torch.cat(logits_all, dim=0)  # [seq_len, batch, vocab]
-            return logits_all, state
+            return torch.cat(logits_all, dim=0), state
         else:
             return logits, state
 
+    def get_memory_usage_stats(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Diagnostic statistics for monitoring memory systems"""
+        stats = {}
 
-# ---------------------------
-# Utility: parameter counting
-# ---------------------------
+        # KV cache usage
+        kv = state['controller_state'].get('kv_cache')
+        stats['kv_cache_len'] = kv.size(0) if kv is not None else 0
+        stats['kv_cache_max'] = self.controller_window
+        stats['kv_utilization'] = stats['kv_cache_len'] / self.controller_window
+
+        # External memory statistics
+        memory = state['memory']  # [batch, N, M]
+        stats['memory_mean'] = memory.mean().item()
+        stats['memory_std'] = memory.std().item()
+        stats['memory_abs_max'] = memory.abs().max().item()
+        stats['memory_sparsity'] = (memory.abs() < 0.01).float().mean().item()
+
+        # Attention sharpness (lower entropy = sharper)
+        read_w = state['read_w']  # [batch, RH, N]
+        write_w = state['write_w']  # [batch, WH, N]
+
+        eps = 1e-12
+        read_entropy = -(read_w * (read_w + eps).log()).sum(-1).mean().item()
+        write_entropy = -(write_w * (write_w + eps).log()).sum(-1).mean().item()
+
+        stats['read_entropy'] = read_entropy
+        stats['write_entropy'] = write_entropy
+        stats['read_sharpness'] = math.log(self.N) - read_entropy  # max_entropy - actual
+        stats['write_sharpness'] = math.log(self.N) - write_entropy
+
+        return stats
+
+
 def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-# ---------------------------
-# Small demo / test in __main__
-# ---------------------------
 if __name__ == "__main__":
-    # Basic settings
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    print("="*70)
+    print("RTNTM - Wide Input Architecture")
+    print("="*70)
+    print(f"Device: {device}\n")
 
-    # Model hyperparameters (start small for testing)
-    memory_N = 32
-    memory_M = 32
-    d_model = 64
+    # Configuration
+    memory_N = 128
+    memory_M = vocab_size  # Can differ from d_model now
+    d_model = 256
     n_heads = 4
-    read_heads = 2
-    write_heads = 1
-    shift_K = 3
+    controller_window = 8
+    read_heads = 1
 
-    model = RTNTM(vocab_size=vocab_size,
-                 d_model=d_model,
-                 memory_N=memory_N,
-                 memory_M=memory_M,
-                 n_heads=n_heads,
-                 n_layers=1,
-                 read_heads=read_heads,
-                 write_heads=write_heads,
-                 shift_width=shift_K).to(device)
+    print("Architecture:")
+    print(f"  Token embedding: vocab_size → d_model ({d_model})")
+    print(f"  Read vectors: {read_heads} heads × M ({memory_M}) = {read_heads * memory_M}")
+    print(f"  Wide input: d_model + RH*M = {d_model} + {read_heads * memory_M} = {d_model + read_heads * memory_M}")
+    print(f"  Compressed to: d_model ({d_model}) for attention")
+    print(f"  KV cache: bounded to {controller_window} tokens")
+    print(f"  External memory: {memory_N} × {memory_M}")
+    print()
 
-    # Print parameter count and basic info
+    model = RTNTM(
+        vocab_size=vocab_size,
+        d_model=d_model,
+        memory_N=memory_N,
+        memory_M=memory_M,
+        n_heads=n_heads,
+        controller_window=controller_window,
+        read_heads=read_heads,
+        write_heads=1,
+        shift_width=3,
+        use_summary=False
+    ).to(device)
+
     total_params = count_parameters(model)
-    print(f"Model total trainable parameters: {total_params:,}")
-    print("Model summary (selected):")
-    print(f" d_model={d_model}, memory N={memory_N}, M={memory_M}, read_heads={read_heads}, write_heads={write_heads}")
+    print(f"Total parameters: {total_params:,}\n")
 
-    # Create a tiny batch of random token sequences for testing copy-like behavior
-    batch = 1
-    seq_len = 10
-    # random tokens from vocab
-    torch.manual_seed(0)
-    token_seq = torch.randint(low=0, high=vocab_size, size=(seq_len, batch), dtype=torch.long, device=device)
+    # Test sequence
+    batch = 2
+    seq_len = 25
 
-    # Run forward wrapper (unrolled)
-    logits_seq, final_state = model.forward(token_seq, state=None, return_all_logits=True)
-    print(f"Processed sequence of length {seq_len} (batch={batch}).")
-    print(f"Logits_seq shape: {logits_seq.shape} (seq_len, batch, vocab)")
+    torch.manual_seed(42)
+    token_seq = torch.randint(0, vocab_size, (seq_len, batch), device=device)
 
-    # Show some diagnostic info: memory norm, sample read weights
-    memory = final_state['memory']  # [batch, N, M]
-    read_w = final_state['read_w']  # [batch, RH, N]
-    write_w = final_state['write_w']  # [batch, WH, N]
+    print(f"Testing sequence: length={seq_len}, batch={batch}")
+    print(f"Sequence length > controller_window ({controller_window})")
+    print("Model MUST use external memory!\n")
 
-    print("Final memory stats per batch (mean, std):")
-    mem_means = memory.mean(dim=[1, 2]).detach().cpu().numpy()
-    mem_stds = memory.std(dim=[1, 2]).detach().cpu().numpy()
-    for b in range(batch):
-        print(f" batch {b}: mean={mem_means[b]:.6f}, std={mem_stds[b]:.6f}")
+    # Process step by step
+    state = model.init_state(batch_size=batch, device=device)
 
-    # Print read/write weight example (first head)
-    print("Sample read weights (first head) [batch, N]:")
-    print(read_w[:, 0, :].detach().cpu().numpy())
+    print("Step-by-step execution:")
+    print("-" * 70)
 
-    print("Sample write weights (first head) [batch, N]:")
-    print(write_w[:, 0, :].detach().cpu().numpy())
-
-    # Convert the last-step predictions to chars (argmax)
-    last_logits = logits_seq[-1, 0, :].cpu()
-    pred_idx = torch.argmax(last_logits).item()
-    pred_char = idx_to_char[pred_idx]
-    print(f"Last step prediction (argmax): index={pred_idx}, char={repr(pred_char)}")
-
-    # Also demonstrate step-by-step API
-    state = model.init_state(batch_size=1, device=device)
-    print("\nDemonstrating step API:")
     for t in range(seq_len):
         x_t = token_seq[t]
         logits, state = model.step(x_t, state)
-        pred = torch.argmax(logits, dim=-1).item()
-        print(f" t={t:02d} input_idx={x_t.item():3d} pred_idx={pred:3d} char={repr(idx_to_char[pred])}")
 
-    print("\nDemo complete.")
+        if t % 5 == 0 or t == seq_len - 1:
+            stats = model.get_memory_usage_stats(state)
+            print(f"t={t:2d}: KV={stats['kv_cache_len']}/{stats['kv_cache_max']} "
+                  f"(util={stats['kv_utilization']:.1%}), "
+                  f"Mem_std={stats['memory_std']:.4f}, "
+                  f"Mem_sparsity={stats['memory_sparsity']:.2%}, "
+                  f"Read_sharp={stats['read_sharpness']:.2f}, "
+                  f"Write_sharp={stats['write_sharpness']:.2f}")
+
+    print("\n" + "="*70)
+    print("Key Observations:")
+    print("  ✓ Wide input preserves full information (no premature compression)")
+    print("  ✓ KV cache saturates at window size (forces external memory)")
+    print("  ✓ Memory std should increase as model writes data")
+    print("  ✓ Sharp attention (high sharpness) indicates focused read/write")
+    print("="*70)

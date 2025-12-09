@@ -4,10 +4,8 @@
      Greg Wayne, gregwayne@google.com
      Ivo Danihelka, danihelka@google.com
 
-Implementation by Hudson Andrew Smelski
-"""
+Hudson Andrew Smelski
 
-"""
 Basic diagram of NTM structure
 
     Input M          Output M
@@ -134,7 +132,7 @@ class NTM(nn.Module):
         Returns: [batch, N]
         """
         batch = memory.size(0)
-        eps = 1e-8
+        eps = 1e-6
 
         # Content addressing
         beta = F.softplus(beta).squeeze(-1)  # [batch]

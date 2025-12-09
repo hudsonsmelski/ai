@@ -1,7 +1,4 @@
-# ================================================================
-# TRAINING SCRIPT FOR NTM ON THE COPY TASK
-# ================================================================
-#
+# Training script for the NTM on 4.1 Copy task from the NTM paper
 # Hudson Andrew Smelski
 
 import os
@@ -10,6 +7,7 @@ import torch.nn.functional as F
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import time
+import datetime
 from collections import deque
 
 from ntm import *
@@ -18,25 +16,15 @@ def ensure_dir(path):
     if not os.path.exists(path):
         os.makedirs(path)
 
-
 def generate_copy_batch(batch_size, seq_len, vocab_size, device):
-    """
-    Creates a batch for the copy task
-    Returns: input_seq [total_len, batch, vocab_size], target_seq [seq_len, batch]
-    """
-    # Random sequences
     seqs = torch.randint(0, vocab_size - 1, (seq_len, batch_size), device=device)
     delimiter = (vocab_size - 1) * torch.ones(1, batch_size, dtype=torch.long, device=device)
     blanks = torch.zeros(seq_len, batch_size, dtype=torch.long, device=device)
 
-    # Input: seq + delimiter + blanks
     input_indices = torch.cat([seqs, delimiter, blanks], dim=0)  # [2*seq_len+1, batch]
-
-    # One-hot encode
     input_seq = F.one_hot(input_indices, num_classes=vocab_size).float()  # [2*seq_len+1, batch, vocab]
 
-    return input_seq, seqs
-
+    return input_seq, seqs #[tensor], ints
 
 def evaluate_copy_accuracy(predictions, targets):
     """
@@ -48,25 +36,14 @@ def evaluate_copy_accuracy(predictions, targets):
     return correct
 
 
-def train_copy_task_until_converged(
-    model,
-    device,
-    max_iters=50000,
-    seq_len_start=4,
-    seq_len_max=20,
-    batch_size=8,
-    lr=1e-4,
-    print_every=100,
-    eval_every=500,
-    save_every=2000,
-    acc_threshold=0.99,
-    loss_threshold=0.01,
-    model_dir="./models",
+def train_copy_task_until_converged(model, device, max_iters=50000, seq_len_start=4, seq_len_max=20,
+    batch_size=8, lr=1e-4, print_every=100, eval_every=500, save_every=2000, acc_threshold=0.99,
+    loss_threshold=0.01, model_dir="./models",
 ):
 
     ensure_dir(model_dir)
     optimizer = Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
     model.train()
 
     current_seq_len = seq_len_start
@@ -173,7 +150,7 @@ def train_copy_task_until_converged(
 
             print(f"[Iter {it:5d}] Loss={loss_val:.4f} (avg={avg_loss:.4f}), Acc={acc*100:.2f}%, "
                   f"Len={current_seq_len}, GradNorm={grad_norm:.2f}, LR={optimizer.param_groups[0]['lr']:.2e}, "
-                  f"Speed={iter_per_sec:.1f} it/s")
+                  f"Speed={iter_per_sec:.1f} it/s", end = "")
 
             # Show example (first in batch)
             with torch.no_grad():
@@ -181,9 +158,8 @@ def train_copy_task_until_converged(
                 target_tokens = target_seq[:, 0].cpu().tolist()
                 pred_str = ''.join(idx_to_char.get(i, '?') for i in pred_tokens)
                 target_str = ''.join(idx_to_char.get(i, '?') for i in target_tokens)
-                print(f"  Target:  {repr(target_str)}")
-                print(f"  Predict: {repr(pred_str)}")
-                print()
+                print(f"  Target:  {repr(target_str)}"
+                      f"  Predict: {repr(pred_str)}")
 
         # Save checkpoint
         if it % save_every == 0:
@@ -239,6 +215,9 @@ def train_copy_task_until_converged(
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    print(f"Start time: {datetime.datetime.now()}")
+
     print("="*60)
     print("NTM BATCHED COPY TASK TRAINING")
     print("="*60)
@@ -265,11 +244,12 @@ if __name__ == "__main__":
     print(f"  Total parameters: {total_params:,}")
     print()
 
+    start_time = time.time()
     final_path = train_copy_task_until_converged(
         model,
         device=device,
         max_iters=50000,
-        seq_len_start=4,
+        seq_len_start=2,
         seq_len_max=20,
         batch_size=32,
         lr=1e-3,
@@ -284,4 +264,7 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("TRAINING FINISHED")
     print(f"Final model: {final_path}")
+    print(f"Time: {(time.time()-start_time)/60:.2f} min")
     print("="*60)
+
+    print(f"\nEnd time: {datetime.datetime.now()}")

@@ -1,7 +1,5 @@
-"""
-Training script for ACT on Logic Task
-Based on Section 3.2 of the ACT paper
-"""
+# Training script for the ACT on 3.2 Logic task from the ACT paper
+# Hudson Andrew Smelski
 
 import torch
 import torch.nn as nn
@@ -254,9 +252,9 @@ if __name__ == "__main__":
     # Hyperparameters (Section 3.2)
     input_size = 102  # 2 bits + 10 gates * 10 one-hot
     output_size = 1   # Single binary output
-    hidden_size = 128
+    hidden_size = 256
     hidden_type = "LSTM"
-    max_steps = 100
+    max_steps = 20
     lr = 1e-3
     tau = 0.01
 
@@ -269,12 +267,12 @@ if __name__ == "__main__":
     train_batches = 10
     eval_batches = 20
     eval_interval = 100
-    target_sequence_accuracy = 0.99
+    target_sequence_accuracy = 0.98
 
     # Curriculum learning
-    current_max_gates = 1
+    current_max_gates = 10
     current_max_seq_len = 1
-    curriculum_threshold = 0.85
+    curriculum_threshold = 0.75
 
     print("=" * 80)
     print("Logic Task - ACT Training")

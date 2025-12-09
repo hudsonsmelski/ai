@@ -1,7 +1,5 @@
-"""
-Training script for ACT on Parity Task
-Based on Section 3.1 of the ACT paper
-"""
+# Training script for the ACT on 3.1 Parity task from the ACT paper
+# Hudson Andrew Smelski
 
 import torch
 import torch.nn as nn

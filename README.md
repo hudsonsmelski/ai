@@ -200,6 +200,8 @@ Really cool architecture, but it has a boring set of problems to train on. DNC n
 
 ```
 > python ntm_copy_task.py
+Using device: cuda
+Start time: 2025-12-08 18:18:22.327769
 ============================================================
 NTM BATCHED COPY TASK TRAINING
 ============================================================
@@ -213,21 +215,66 @@ Model Configuration:
 
 ...
 
-[Iter  7900] Loss=0.8753 (avg=0.8803), Acc=97.81%, Len=20, GradNorm=0.89, LR=1.00e-03, Speed=5.8 it/s
-  Target:  'Pqh-7R:`E{O9Mk7(TZ|o'
-  Predict: 'Pqh-:R:`E{O9Mk7(TZ|o'
-
 ============================================================
 === TRAINING COMPLETE ===
-Reached acc=99.06% and loss=0.8579 at max seq_len=20
+Reached acc=99.06% and loss=0.8745 at max seq_len=20
 ============================================================
 
 >>> Final model saved to: ./models/ntm_copy_final.pt
->>> Best model (acc=96.41%) saved to: ./models/ntm_copy_best.pt
+>>> Best model (acc=97.03%) saved to: ./models/ntm_copy_best.pt
 
 ============================================================
 TRAINING FINISHED
 Final model: ./models/ntm_copy_final.pt
+Time: 13.79 min
+============================================================
+
+End time: 2025-12-08 18:32:09.67591
+```
+
+### Repeat Copy Task
+
+```
+> python ntm_repeat_copy_task.py
+============================================================
+NTM REPEAT COPY TASK TRAINING
+============================================================
+Device: cuda
+
+Model Configuration:
+  Vocab size: 97 (+2 for task channels)
+  Memory: 128 x 99
+  Controller: RNN
+  Total parameters: 358,450
+  
+...
+
+>>> Curriculum: seq_len=10, max_repeats=10 <<<
+
+
+[EVAL Iter 18500] Loss=0.2051, Acc=94.74%, EndMarker=100.00% (len=10, repeats=10)
+  Repeats: 10
+  Eval Target:  '>"[g|O\\&27>"[g|O\\&27>"[g|O\\&27>"[g|O\\&27>"[g|O\\&27>"[g|O\\&27>"[g|O\\&27>"[g|O\\&27>"[g|O\\&27>"[g|O\\&27\n'
+  Eval Predict: '>"[g|O\\&27>"[g|O\\&27>"[g|O\\&27>"[g|O\\&27\n"[g|O\\&27\n"[g|O\\&27\n"[g|O\\&27\n"[g|O\\&27\n"[g|O\\&27\n"[g|O\\&27\n'
+
+>>> New best accuracy: 94.74% - Saved to ./models_repeat/ntm_repeat_copy_best.pt
+[Iter 18500] Loss=0.5195 (avg=0.5434), Acc=96.39%, EndMarker=68.75%, Len=10, Repeats=1-10, GradNorm=1.43, LR=2.50e-04 |   Repeats: 3,   Target:  '%E_o2R:dW %E_o2R:dW %E_o2R:dW \n',   Predict: '%E_o2R:dW %E_o2R:dW \nE_o2R:dW \n'
+[Iter 18600] Loss=0.5628 (avg=0.5418), Acc=95.15%, EndMarker=18.75%, Len=10, Repeats=1-10, GradNorm=2.90, LR=2.50e-04 |   Repeats: 1,   Target:  'jYh0fLL(0"\n',   Predict: 'jYhXfLL(S"j'
+[Iter 18700] Loss=0.5431 (avg=0.5365), Acc=97.49%, EndMarker=50.00%, Len=10, Repeats=1-10, GradNorm=2.60, LR=2.50e-04 |   Repeats: 8,   Target:  "5'xK N<Y=N5'xK N<Y=N5'xK N<Y=N5'xK N<Y=N5'xK N<Y=N5'xK N<Y=N5'xK N<Y=N5'xK N<Y=N\n",   Predict: "5'xK N<Y=N5'xK N<Y=N5'xK N<Y=N5'xK N<Y=N5'xK N<Y=N5'xK N<Y=N5'xK N<Y=N5'xK N<Y=N\n"
+[Iter 18800] Loss=0.5313 (avg=0.5281), Acc=95.09%, EndMarker=56.25%, Len=10, Repeats=1-10, GradNorm=1.87, LR=2.50e-04 |   Repeats: 1,   Target:  '7T|4?Q{;\\y\n',   Predict: '77|4?Q{;\\y\n'
+
+============================================================
+=== TRAINING COMPLETE ===
+Reached acc=98.36%, end_acc=81.25%
+Max seq_len=10, max_repeats=10
+============================================================
+
+>>> Final model saved to: ./models_repeat/ntm_repeat_copy_final.pt
+>>> Best model (acc=94.74%) saved to: ./models_repeat/ntm_repeat_copy_best.pt
+
+============================================================
+TRAINING FINISHED
+Final model: ./models_repeat/ntm_repeat_copy_final.pt
 ============================================================
 ```
 
@@ -239,12 +286,18 @@ TODO
 
 Recurrent Transformer NTM
 
-I don't understand this at all, so, yeah.
+It has limited internal memory so that it uses it's NxM memory and not the context cache.
+https://h-huang.github.io/tutorials/beginner/transformer_tutorial.html
+
 
 ### Copy Task
 
+Some training runs for this task complete in barely any time, learning the task completely. Other times it takes a while.
+
 ```
 > python rtntm_copy_task.py
+Using device: cuda
+Start time: 2025-12-08 18:10:34.938830
 ============================================================
 TNTM COPY TASK TRAINING
 ============================================================
@@ -252,47 +305,66 @@ Device: cuda
 
 Model Configuration:
   d_model: 100
-  Memory: 20 x 97
-  Read/Write heads: 2/1
-  Total parameters: 221,200
+  Memory: 25 x 97
+  Read/Write heads: 1/1
+  Total parameters: 200,997
   
 ...
 
->>> Curriculum: Increasing seq_len to 9 <<<
-
-[Iter  1200] Loss=0.0131 (avg=0.1444), Acc=100.00%, Len=9, GradNorm=0.14, LR=1.00e-03, Speed=8.9 it/s
-  Target:  '<05Ro/ggu'
-  Predict: '<05Ro/ggu'
-
-
->>> Curriculum: Increasing seq_len to 11 <<<
-
-
->>> Curriculum: Increasing seq_len to 13 <<<
-
-
->>> Curriculum: Increasing seq_len to 15 <<<
-
-
->>> Curriculum: Increasing seq_len to 17 <<<
-
-
->>> Curriculum: Increasing seq_len to 19 <<<
-
-
->>> Curriculum: Increasing seq_len to 20 <<<
-
-
 ============================================================
 === TRAINING COMPLETE ===
-Reached acc=100.00% and loss=0.0089 at max seq_len=20
+Reached acc=100.00% and loss=0.0064 at max seq_len=20
 ============================================================
 
->>> Final model saved to: ./models/tntm_copy_final.pt
->>> Best model (acc=100.00%) saved to: ./models/tntm_copy_best.pt
+>>> Final model saved to: ./models/rtntm_copy_final.pt
+>>> Best model (acc=36.25%) saved to: ./models/rtntm_copy_best.pt
 
 ============================================================
 TRAINING FINISHED
-Final model: ./models/tntm_copy_final.pt
+Final model: ./models/rtntm_copy_final.pt
+Time: 2.42 min
 ============================================================
+
+End time: 2025-12-08 18:13:00.474476
+```
+
+### Repeat Copy Task
+
+```
+> python rtntm_repeat_copy_task.py
+======================================================================
+RTNTM REPEAT COPY TASK TRAINING
+======================================================================
+Device: cuda
+Start time: 2025-12-08 19:35:31.690590
+
+Model Configuration:
+  Base vocab size: 97
+  Extended vocab (with special tokens): 108
+  d_model: 216
+  Memory: 128 × 108
+  Controller window: 8 (bounded KV cache)
+  Read heads: 1, Write heads: 1
+  Attention heads: 4
+
+Total parameters: 775,992
+Wide input dimension: 216 + 1×108 = 324
+
+...
+
+============================================================
+=== TRAINING COMPLETE ===
+Reached acc=98.24%, end_acc=81.25%
+Max seq_len=10, max_repeats=10
+============================================================
+
+>>> Final model saved to: ./models_rtntm_repeat/rtntm_repeat_copy_final.pt
+>>> Best model (acc=78.16%) saved to: ./models_rtntm_repeat/rtntm_repeat_copy_best.pt
+
+======================================================================
+TRAINING FINISHED
+Final model: ./models_rtntm_repeat/rtntm_repeat_copy_final.pt
+Training time: 29.47 minutes
+End time: 2025-12-08 20:05:00.315272
+======================================================================
 ```

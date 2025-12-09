@@ -1,7 +1,6 @@
-"""
-Training script for ACT on Addition Task
-Based on Section 3.3 of the ACT paper
-"""
+# Training script for the ACT on 3.3 Addition task from the ACT paper
+# Hudson Andrew Smelski
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
