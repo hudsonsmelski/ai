@@ -14,7 +14,6 @@ Adaptive Computation Time recurrent neural network. It allows the network to spe
 ### Parity
 
 With a careful training curriculum I was able to get the network to reliably train for longer sequences by starting with 1 and incrementing by 1 each time. So the vector starts out as mostly zeroes and the ACT net learns to classify with 85% accuracy. Filling only the start (or end) of the input vector makes it learn more slowly and is just bad for it's generalization. This reinforces the idea that a huge network and specialized input encodings are less important than a good architecture and training curriculum. This is the learning for input vectors of length 64, but I overkilled it for faster accuracy convergence.
-TODO: figure out why it gets stuck at ~90% accuracy with 128 hidden size.
 
 ```
 > python act_parity.py
@@ -282,3 +281,41 @@ Final model: ./models_repeat/ntm_repeat_copy_final.pt
 
 TODO
 
+## RTNTM
+
+Recurrent Transformer controller for the NTM mechanism.
+
+### Copy Task
+
+```
+> python rtntm_copy_task.py
+======================================================================
+Start time: 2025-12-13 01:11:13.994038
+======================================================================
+
+Using device: cuda
+
+======================================================================
+RTNTM COPY TASK TRAINING
+======================================================================
+
+Model Configuration:
+  Vocab size: 100
+  Embedding dimension: 200
+  Memory: 30 × 200
+  Transformer: 1 layers, 4 heads
+  Controller window: 4
+  Read heads: 1, Write heads: 1
+  Total parameters: 1,048,112
+  
+...
+
+
+```
+
+### Reverse Copy
+
+### Add Numbers
+
+```
+```
