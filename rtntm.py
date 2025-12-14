@@ -17,6 +17,29 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Any, Tuple, Optional
 
+class PositionalEncoding(nn.Module):
+    """
+    Classic sinusoidal positional encoding.
+    """
+    def __init__(self, d_model: int, max_len: int = 5000):
+        super().__init__()
+        pe = torch.zeros(max_len, 1, d_model)
+        position = torch.arange(max_len).unsqueeze(1).float()
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)  # Not a parameter, persists in state_dict
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Tensor of shape [seq_len, batch, d_model]
+        Returns:
+            x + positional encoding
+        """
+        seq_len = x.size(0)
+        return x + self.pe[:seq_len]
+
 class TransformerController(nn.Module):
     """
     Transformer controller with embeddings that integrates read vectors into attention.
@@ -38,6 +61,8 @@ class TransformerController(nn.Module):
         self.n_heads = n_heads
         self.n_layers = n_layers
         self.window_size = window_size
+
+        self.pos_encoding = PositionalEncoding(d_model, window_size)
 
         # Transformer layers
         encoder_layer = nn.TransformerEncoderLayer(
@@ -78,6 +103,8 @@ class TransformerController(nn.Module):
                 context = context[-self.window_size:]
         else:
             context = current_input
+
+        context = self.pos_encoding(context)
 
         # Apply transformer over full context
         context_out = self.transformer(context)  # [hist_len+RH, batch, D]
@@ -150,7 +177,15 @@ class RTNTM(nn.Module):
             window_size=controller_window,
             dropout=dropout
         )
-        self.state_update = nn.GRUCell(self.D, self.D)
+        #self.state_update = nn.GRUCell(self.D, self.D)
+        #self.state_update = nn.LSTMCell(self.D, self.D)
+        self.state_layers = 2 #TODO: parameterize this as an arg
+        self.state_update = nn.LSTM(
+            input_size=self.D,
+            hidden_size=self.D,
+            num_layers=self.state_layers,
+            dropout=0.1 if self.state_layers > 1 else 0.0
+        )
 
         # Output head for next token prediction
         self.token_head = nn.Linear(self.D, vocab_size)
@@ -184,6 +219,9 @@ class RTNTM(nn.Module):
         self.write_w = write_w
 
         self.record = torch.zeros(batch_size, self.D, device = device)
+        #self.c = torch.zeros(batch_size, self.D, device = device)
+        self.hx = torch.zeros(self.state_layers, batch_size, self.D, device=device)
+        self.cx = torch.zeros(self.state_layers, batch_size, self.D, device=device)
         self.input_history = torch.zeros(1, batch_size, self.D, device = device)
 
     def addressing(self, key, beta, gate, shift, gamma, prev_w, memory) -> torch.Tensor:
@@ -251,20 +289,26 @@ class RTNTM(nn.Module):
 
         read_vecs = torch.sum(read_vecs, dim = 1) #[batch, M]
 
-        #FILM
+        #FiLM
         film_params = self.film(self.record) #[batch, 2*M]
         gamma, beta = film_params.chunk(2, dim=-1)
         gamma = 1 + torch.tanh(gamma)
 
         read_gate = torch.sigmoid(self.read_gate(self.record))
         input_vector = gamma * input_emb + beta + read_gate * read_vecs
+        #input_vector = input_emb + self.record + read_gate * read_vecs
 
         # Controller forward: transformer over [input_history + projected_reads]
         controller_out, self.input_history = self.controller.forward_step(
             input_vector, self.input_history)
         # controller_out: [batch, d_model]
 
-        self.record = self.state_update(controller_out, self.record)
+        #self.record, self.c = self.state_update(controller_out, (self.record, self.c))
+        controller_out_unsq = controller_out.unsqueeze(0)  # [1, batch, D]
+        output, (self.hx, self.cx) = self.state_update(controller_out_unsq, (self.hx, self.cx))
+        self.record = self.hx[-1]  # Take top layer as conditioning state
+
+        controller_out = controller_out + output.squeeze()
 
         # Next token prediction
         logits = self.token_head(controller_out)  # [batch, vocab_size]

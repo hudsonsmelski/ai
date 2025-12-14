@@ -284,13 +284,16 @@ TODO
 ## RTNTM
 
 Recurrent Transformer controller for the NTM mechanism.
+It now learns adding two numbers together faster than copying. SMH
+Copy task is much faster with vocab size of 20, go figure.
+This must be an embedding dimension problem?
 
 ### Copy Task
 
 ```
 > python rtntm_copy_task.py
 ======================================================================
-Start time: 2025-12-13 01:11:13.994038
+Start time: 2025-12-13 16:07:41.777639
 ======================================================================
 
 Using device: cuda
@@ -301,12 +304,12 @@ RTNTM COPY TASK TRAINING
 
 Model Configuration:
   Vocab size: 100
-  Embedding dimension: 200
-  Memory: 30 × 200
+  Embedding dimension: 128
+  Memory: 40 × 128
   Transformer: 1 layers, 4 heads
-  Controller window: 4
+  Controller window: 8
   Read heads: 1, Write heads: 1
-  Total parameters: 1,048,112
+  Total parameters: 605,552
   
 ...
 
@@ -318,4 +321,44 @@ Model Configuration:
 ### Add Numbers
 
 ```
+> python rtntm_add_nums.py
+======================================================================
+Start time: 2025-12-13 21:04:16.582605
+======================================================================
+
+Using device: cuda
+
+======================================================================
+RTNTM ADDITION TASK (Little-Endian)
+======================================================================
+
+Model Configuration:
+  Vocab: 0123456789+=_ (size=13)
+  Embedding dimension: 128
+  Memory: 50 × 128
+  Transformer: 1 layers, 4 heads
+  Controller window: 10 (forces external memory use)
+  Read heads: 2, Write heads: 1
+  Total parameters: 600,479
+  
+...
+
+======================================================================
+>>> CURRICULUM: Advancing to num_len=20
+======================================================================
+
+[Iter 15100] num_len=20 | Loss: 0.0127 | CharAcc: 0.9969 | SeqAcc: 0.9375 | GradNorm: 8.72 | LR: 2.50e-04 | Time: 2975.7s
+======================================================================
+Reached target num_len=20
+CharAcc=1.0000, SeqAcc=1.0000, Loss=0.0098
+======================================================================
+
+======================================================================
+TRAINING FINISHED
+Final model: ./models_rtntm_add/rtntm_add_littleendian_final.pt
+Total time: 49.64 minutes (0.83 hours)
+======================================================================
+
+End time: 2025-12-13 21:53:55.034914
+======================================================================
 ```
