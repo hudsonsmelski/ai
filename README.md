@@ -279,21 +279,24 @@ Final model: ./models_repeat/ntm_repeat_copy_final.pt
 
 ## DNC
 
-TODO
+TODO: for temporal and dynamic memory
 
 ## RTNTM
 
-Recurrent Transformer controller for the NTM mechanism.
-It now learns adding two numbers together faster than copying. SMH
-Copy task is much faster with vocab size of 20, go figure.
-This must be an embedding dimension problem?
+Recurrent Transformer controller for the NTM mechanism. It learns both the copy task and adding two numbers task.
+
+Apparently, the model benefits from having a large enough embedding dimension so the copy task model size is huge.
+
+Adding an LSTM for state layers makes the copy task take much longer. RNNs give much smaller hit to speed.
+
+I'd love to figure out a way to give the transformer context which represents the state of the system in addition to the memory component. The memory handles the arbitrary length input problem (ideally). But the fact transformers are not recurrent is a problem for algorithmic tasks and actually understanding deep concepts and their interactions. In particular mapping out the search space and actually searching it is probably impossible for 
 
 ### Copy Task
 
 ```
 > python rtntm_copy_task.py
 ======================================================================
-Start time: 2025-12-13 16:07:41.777639
+Start time: 2025-12-14 23:05:38.240633
 ======================================================================
 
 Using device: cuda
@@ -304,16 +307,64 @@ RTNTM COPY TASK TRAINING
 
 Model Configuration:
   Vocab size: 100
-  Embedding dimension: 128
-  Memory: 40 × 128
-  Transformer: 1 layers, 4 heads
-  Controller window: 8
+  Embedding dimension: 200
+  Memory: 60 × 200
+  Transformer: 1 layers, 2 heads
+  Controller window: 4
   Read heads: 1, Write heads: 1
-  Total parameters: 605,552
+  Total parameters: 1,578,162
   
 ...
 
+======================================================================
+=== TRAINING COMPLETE ===
+Reached acc=100.00% and loss=0.0021
+at max seq_len=50
+======================================================================
 
+>>> Final model saved to: ./models_rtntm/rtntm_copy_final.pt
+>>> Best model (acc=2.63%, loss=6.5686) at: ./models_rtntm/rtntm_copy_best.pt
+
+======================================================================
+TRAINING FINISHED
+Final model: ./models_rtntm/rtntm_copy_final.pt
+Total time: 1.97 minutes (0.03 hours)
+======================================================================
+
+End time: 2025-12-14 23:07:36.857425
+======================================================================
+
+> python rtntm_copy_task.py
+Start time: 2025-12-18 00:53:38.960121
+Using device: cuda
+RTNTM COPY TASK TRAINING
+
+Model Configuration:
+  Vocab size: 100
+  Embedding dimension: 200
+  Memory: 60 × 200
+  Transformer: 1 layers, 4 heads
+  Controller window: 4
+  Read heads: 1, Write heads: 1
+  Total parameters: 913,362
+  
+======================================================================
+=== TRAINING COMPLETE ===
+Reached acc=100.00% and loss=0.0089
+at max seq_len=50
+======================================================================
+
+>>> Final model saved to: ./models_rtntm/rtntm_copy_final.pt
+>>> Best model (acc=2.06%, loss=10.0097) at: ./models_rtntm/rtntm_copy_best.pt
+
+======================================================================
+TRAINING FINISHED
+Final model: ./models_rtntm/rtntm_copy_final.pt
+Total time: 3.32 minutes (0.06 hours)
+======================================================================
+
+End time: 2025-12-18 00:56:58.403280
+======================================================================
 ```
 
 ### Reverse Copy
@@ -323,7 +374,7 @@ Model Configuration:
 ```
 > python rtntm_add_nums.py
 ======================================================================
-Start time: 2025-12-13 21:04:16.582605
+Start time: 2025-12-16 11:19:33.480771
 ======================================================================
 
 Using device: cuda
@@ -333,32 +384,29 @@ RTNTM ADDITION TASK (Little-Endian)
 ======================================================================
 
 Model Configuration:
-  Vocab: 0123456789+=_ (size=13)
-  Embedding dimension: 128
-  Memory: 50 × 128
-  Transformer: 1 layers, 4 heads
-  Controller window: 10 (forces external memory use)
+  Vocab: 0123456789+= _ (size=14)
+  Embedding dimension: 64
+  Memory: 128 × 64
+  Transformer: 1 layers, 2 heads
+  Controller window: 5 (forces external memory use)
   Read heads: 2, Write heads: 1
-  Total parameters: 600,479
+  Total parameters: 202,871
   
 ...
 
 ======================================================================
->>> CURRICULUM: Advancing to num_len=20
-======================================================================
-
-[Iter 15100] num_len=20 | Loss: 0.0127 | CharAcc: 0.9969 | SeqAcc: 0.9375 | GradNorm: 8.72 | LR: 2.50e-04 | Time: 2975.7s
-======================================================================
 Reached target num_len=20
-CharAcc=1.0000, SeqAcc=1.0000, Loss=0.0098
+CharAcc=1.0000, SeqAcc=1.0000, Loss=0.0065
 ======================================================================
 
 ======================================================================
 TRAINING FINISHED
 Final model: ./models_rtntm_add/rtntm_add_littleendian_final.pt
-Total time: 49.64 minutes (0.83 hours)
+Total time: 51.35 minutes (0.86 hours)
 ======================================================================
 
-End time: 2025-12-13 21:53:55.034914
+End time: 2025-12-16 12:10:54.945041
 ======================================================================
+
+
 ```

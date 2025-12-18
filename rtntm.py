@@ -17,6 +17,29 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Any, Tuple, Optional
 
+#TODO, hook up with larger kernel size for input sequences
+class CNNEmbedding(nn.Module):
+    def __init__(self, vocab_size, emb_dim):
+        super().__init__()
+        self.vocab_size = vocab_size
+
+        # One-hot to embedding via convolutions
+        intermediate = (vocab_size + emb_dim)//2
+        self.l1 = nn.Conv1d(vocab_size, intermediate, kernel_size=1)
+        self.l2 = nn.Conv1d(intermediate, emb_dim, kernel_size=1)
+        self.bn1 = nn.BatchNorm1d(intermediate)
+        self.bn2 = nn.BatchNorm1d(emb_dim)
+
+    def forward(self, x_t):
+        # x_t: [batch] token indices
+        # Convert to one-hot
+        one_hot = F.one_hot(x_t, num_classes=self.vocab_size).float()  # [batch, vocab]
+        one_hot = one_hot.unsqueeze(-1)  # [batch, vocab, 1]
+
+        x = F.gelu(self.bn1(self.l1(one_hot)))
+        x = F.gelu(self.bn2(self.l2(x)))
+        return x.squeeze(-1)  # [batch, emb_dim]
+
 class PositionalEncoding(nn.Module):
     """
     Classic sinusoidal positional encoding.
@@ -78,42 +101,30 @@ class TransformerController(nn.Module):
 
     def forward_step(self,
                      input_emb: torch.Tensor, # [batch, D] embedded input
-                     input_history: torch.Tensor):
+                     input_history,
+                     read_vecs):
         """
-        Process one timestep with embedded input and projected read vectors.
-
-        Args:
-            input_emb: [batch, D] - embedded input token
-            ctl_state: dict with 'input_history' [hist_len, batch, D]
-
-        Returns:
-            controller_out: [batch, D] - output for prediction & NTM control
-            new_ctl_state: updated state dict
+        Forward step recieves:
+        0 input vector,
+        1 previous state vector(s),
+        2 memory vector(s)
         """
-        batch = input_emb.shape[0]
-        device = input_emb.device
-
-        # Add current input to history
-        current_input = input_emb.unsqueeze(0)  # [1, batch, D]
-
+        #inputs includes read vectors which we won't store
         if input_history is not None:
-            context = torch.cat([input_history, current_input], dim=0)
-            # Enforce window size
-            if context.size(0) > self.window_size:
-                context = context[-self.window_size:]
+            input_history = torch.cat([input_history, input_emb.unsqueeze(0)], dim=0)
+            if input_history.size(0) > self.window_size:
+                input_history = input_history[-self.window_size:]
         else:
-            context = current_input
+            input_history = input_emb.unsqueeze(0)
 
-        context = self.pos_encoding(context)
+        #context = self.pos_encoding(input_history)
+        context = torch.cat([read_vecs, input_history], dim=0)
+        context = self.transformer(context)  # [hist_len+RH, batch, D]
 
-        # Apply transformer over full context
-        context_out = self.transformer(context)  # [hist_len+RH, batch, D]
         current_pos = context.size(0) - 1
-        controller_out = context_out[current_pos]  # [batch, D]
-
+        controller_out = context[current_pos]  # [batch, D]
         controller_out = self.output_norm(controller_out)
-        return controller_out, context
-
+        return controller_out, input_history
 
 class RTNTM(nn.Module):
     def __init__(self,
@@ -126,20 +137,18 @@ class RTNTM(nn.Module):
                  read_heads: int = 1,
                  write_heads: int = 1,
                  shift_width: int = 3,
+                 state_layers: int = 1,
                  dropout: float = 0.1):
         """
-        RTNTM with FiLM modulation and persistent GRU state.
+        RTNTM
+        Experimenting: embedding dimension (D) = memory vector length (M)
+        We are storing the embedding dimension vectors in memory
+        We are using a recurrent layer(s) after the transformer, such that the transformer is self aware.
+        The Transformer will act as the context arbiter for the recurrent layer(s) to focus.
 
-        Key features:
-        - FiLM: Conditions input on persistent record state
-        - GRU State: Maintains context beyond bounded history window
-        - Direct read integration: Read vectors added to FiLM output
-
-        Args:
-            vocab_size: Size of token vocabulary
-            emb_dim: Embedding and hidden dimension (D)
-            memory_N: Number of memory slots
-            ...
+        Context = Immediate mental context            (Context Length x D)
+        Cx      = Short term memory from LSTM layers  (# State Layers x D)
+        NxD     = Long term memory storage            (N# Mem vectors x D)
         """
         super().__init__()
 
@@ -156,18 +165,9 @@ class RTNTM(nn.Module):
         self.controller_window = controller_window
 
         # Input embedding
-        self.embedding = nn.Embedding(vocab_size, emb_dim)
-        nn.init.normal_(self.embedding.weight, mean=0, std=0.02)
-
-        # Project read vectors from M to D if we allow different size M
-        #self.read_projection = nn.Linear(memory_M, emb_dim)
-
-        self.read_gate = nn.Linear(self.D, self.M)
-        self.film = nn.Linear(self.D, 2 * self.D)
-        # Initialize gamma bias to 0 (so initial gamma ≈ 1)
-        nn.init.zeros_(self.film.bias[:self.D])
-        # Initialize beta bias to 0 (so initial beta ≈ 0)
-        nn.init.zeros_(self.film.bias[self.D:])
+        #self.embedding = nn.Embedding(vocab_size, emb_dim)
+        #nn.init.normal_(self.embedding.weight, mean=0, std=0.02)
+        self.embedding = CNNEmbedding(vocab_size, emb_dim)
 
         # Transformer controller
         self.controller = TransformerController(
@@ -177,26 +177,38 @@ class RTNTM(nn.Module):
             window_size=controller_window,
             dropout=dropout
         )
-        #self.state_update = nn.GRUCell(self.D, self.D)
-        #self.state_update = nn.LSTMCell(self.D, self.D)
-        self.state_layers = 2 #TODO: parameterize this as an arg
-        self.state_update = nn.LSTM(
-            input_size=self.D,
-            hidden_size=self.D,
-            num_layers=self.state_layers,
-            dropout=0.1 if self.state_layers > 1 else 0.0
-        )
+
+        #For expanded ability and reduced error
+        self.head_dim = self.D
+        self.state_layers = state_layers
+        #self.state_update = nn.LSTM(self.D, self.head_dim, self.state_layers, 0.1 if self.state_layers > 1 else 0.0)
+        self.state_update = nn.RNN(self.D, self.head_dim, self.state_layers)
 
         # Output head for next token prediction
-        self.token_head = nn.Linear(self.D, vocab_size)
+        #self.token_head = nn.Linear(self.D, vocab_size)
+        self.token_head = nn.Sequential(
+            nn.Linear(self.head_dim, self.head_dim),
+            nn.ReLU(),
+            nn.Linear(self.head_dim, vocab_size)
+        )
 
         # Read head: projects controller output to NTM read parameters
         self.read_param_len = self.M + 1 + 1 + self.shift_K + 1
-        self.read_head = nn.Linear(self.D, self.RH * self.read_param_len)
+        #self.read_head = nn.Linear(self.D, self.RH * self.read_param_len)
+        self.read_head = nn.Sequential(
+            nn.Linear(self.head_dim, self.head_dim),
+            nn.ReLU(),
+            nn.Linear(self.head_dim, self.RH * self.read_param_len)
+        )
 
         # Write head: projects controller output to NTM write parameters
         self.write_param_len = self.M + 1 + 1 + self.shift_K + 1 + self.M + self.M
-        self.write_head = nn.Linear(self.D, self.WH * self.write_param_len)
+        #self.write_head = nn.Linear(self.D, self.WH * self.write_param_len)
+        self.write_head = nn.Sequential(
+            nn.Linear(self.head_dim, self.head_dim),
+            nn.ReLU(),
+            nn.Linear(self.head_dim, self.WH * self.write_param_len)
+        )
 
         # Initialize memory to zeros
         self.register_buffer('memory_initial', torch.zeros(self.N, self.M))
@@ -218,12 +230,12 @@ class RTNTM(nn.Module):
         write_w[:, :, 0] = 1.0
         self.write_w = write_w
 
-        self.record = torch.zeros(batch_size, self.D, device = device)
-        #self.c = torch.zeros(batch_size, self.D, device = device)
+        self.record = torch.zeros(1, batch_size, self.D, device = device)
         self.hx = torch.zeros(self.state_layers, batch_size, self.D, device=device)
-        self.cx = torch.zeros(self.state_layers, batch_size, self.D, device=device)
-        self.input_history = torch.zeros(1, batch_size, self.D, device = device)
+        #self.cx = torch.zeros(self.state_layers, batch_size, self.D, device=device)
+        self.input_history = None#torch.zeros(1, batch_size, self.D, device = device)
 
+    #TODO: We want to upgrade to DNC style memory addressing, and if we can, even better.
     def addressing(self, key, beta, gate, shift, gamma, prev_w, memory) -> torch.Tensor:
         """NTM addressing mechanism"""
         eps = 1e-12
@@ -278,43 +290,26 @@ class RTNTM(nn.Module):
             r = torch.bmm(w, self.memory).squeeze(1)  # [batch, M]
             read_vecs.append(r)
             #read_vecs.append(self.read_projection(r))
-        read_vecs = torch.stack(read_vecs, dim = 1) # [batch, RH, M]
-
-        # Use record state to attend over read heads
-        #read_attn = F.softmax(torch.bmm(
-        #    self.record.unsqueeze(1),  # [batch, 1, D]
-        #    read_vecs.transpose(1, 2)  # [batch, D, RH]
-        #).squeeze(1), dim=-1)  # [batch, RH]
-        #read_vecs = (read_vecs * read_attn.unsqueeze(-1)).sum(dim=1)  # [batch, M]
-
-        read_vecs = torch.sum(read_vecs, dim = 1) #[batch, M]
-
-        #FiLM
-        film_params = self.film(self.record) #[batch, 2*M]
-        gamma, beta = film_params.chunk(2, dim=-1)
-        gamma = 1 + torch.tanh(gamma)
-
-        read_gate = torch.sigmoid(self.read_gate(self.record))
-        input_vector = gamma * input_emb + beta + read_gate * read_vecs
-        #input_vector = input_emb + self.record + read_gate * read_vecs
+        read_vecs = torch.stack(read_vecs, dim = 0) # [RH, batch, M]
 
         # Controller forward: transformer over [input_history + projected_reads]
         controller_out, self.input_history = self.controller.forward_step(
-            input_vector, self.input_history)
+            input_emb, self.input_history, read_vecs)
         # controller_out: [batch, d_model]
 
-        #self.record, self.c = self.state_update(controller_out, (self.record, self.c))
-        controller_out_unsq = controller_out.unsqueeze(0)  # [1, batch, D]
-        output, (self.hx, self.cx) = self.state_update(controller_out_unsq, (self.hx, self.cx))
-        self.record = self.hx[-1]  # Take top layer as conditioning state
+        state_input = controller_out.unsqueeze(0)  # [1, batch, D]
+        #output, (self.hx, self.cx) = self.state_update(state_input, (self.hx, self.cx))
+        output, self.hx = self.state_update(state_input, self.hx)
 
-        controller_out = controller_out + output.squeeze()
+        #self.record = torch.cat((self.cx, output), dim = 0) #[state_layers + 1, batch, D]
+        output = output.squeeze() #[batch, D]
+        #output = controller_out
 
         # Next token prediction
-        logits = self.token_head(controller_out)  # [batch, vocab_size]
+        logits = self.token_head(output)  # [batch, vocab_size]
 
         # Generate read parameters from controller output
-        read_params = self.read_head(controller_out)  # [batch, RH * read_param_len]
+        read_params = self.read_head(output)  # [batch, RH * read_param_len]
         read_params = read_params.view(batch, self.RH, self.read_param_len)
 
         new_read_w = []
@@ -334,7 +329,7 @@ class RTNTM(nn.Module):
         self.read_w = torch.stack(new_read_w, dim=1)
 
         # Generate write parameters and update memory
-        write_params = self.write_head(controller_out)
+        write_params = self.write_head(output)
         write_params = write_params.view(batch, self.WH, self.write_param_len)
 
         mem = self.memory
@@ -504,10 +499,10 @@ if __name__ == "__main__":
 
     for t in range(seq_len):
         x_t = token_seq[t]
-        logits, state = model.step(x_t, state)
+        logits = model.step(x_t)
 
         if t % 5 == 0 or t == seq_len - 1:
-            stats = model.get_memory_usage_stats(state)
+            stats = model.get_memory_usage_stats()
             print(f"t={t:2d}: InputHist={stats['input_history_len']:>2}/{stats['input_history_max']} "
                   f"(util={stats['history_utilization']:>5.1%}), "
                   f"Mem_std={stats['memory_std']:.4f}, "
@@ -522,8 +517,8 @@ if __name__ == "__main__":
     print("Testing Full Sequence Forward Pass")
     print("="*70)
 
-    state = model.init_state(batch_size=batch, device=device)
-    all_logits, final_state = model.forward(token_seq, state=state, return_all_logits=True)
+    model.init_state(batch_size=batch, device=device)
+    all_logits, final_state = model.forward(token_seq, return_all_logits=True)
 
     print(f"Input shape:  {token_seq.shape}")
     print(f"Output shape: {all_logits.shape}")
@@ -557,7 +552,7 @@ if __name__ == "__main__":
     print("\n" + "="*70)
     print("Final Memory Statistics")
     print("="*70)
-    stats = model.get_memory_usage_stats(final_state)
+    stats = model.get_memory_usage_stats()
     print(f"Memory utilization:")
     print(f"  Mean value:     {stats['memory_mean']:>8.4f}")
     print(f"  Std deviation:  {stats['memory_std']:>8.4f}")

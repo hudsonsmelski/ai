@@ -27,7 +27,7 @@ def generate_copy_batch(batch_size, seq_len, vocab_size, device):
         seq_lengths: [batch] - actual length of each sequence
     """
     # Random length for each sequence in the batch
-    seq_lengths = torch.randint(1, seq_len + 1, (batch_size,), device=device)
+    seq_lengths = torch.randint(max(seq_len-1, 1), seq_len + 1, (batch_size,), device=device)
     max_len = seq_lengths.max().item()
 
     # Total input length: seq + delimiter + blanks for recall
@@ -91,10 +91,7 @@ def train_copy_task_until_converged(
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
 
-    # Use AdamW with weight decay
-    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.01, betas=(0.9, 0.98))
-
-    # Cosine annealing scheduler
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0, betas=(0.9, 0.98))
     scheduler = CosineAnnealingLR(optimizer, T_max=max_iters, eta_min=lr*0.1)
 
     model.train()
@@ -333,33 +330,23 @@ if __name__ == "__main__":
     # Simple tokenizer
     # ---------------------------
     vocab = string.digits + string.ascii_letters + string.punctuation + " \t\v\n\r\f"
-    vocab_size = 20#len(vocab)
-    vocab = vocab[:vocab_size]
+    vocab_size = len(vocab)
     char_to_idx = {char: idx for idx, char in enumerate(vocab)}
     idx_to_char = {idx: char for char, idx in char_to_idx.items()}
 
-    print("="*70)
     print(f"Start time: {datetime.datetime.now()}")
-    print("="*70)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.set_default_device(device)
-    print(f"\nUsing device: {device}")
-
-    print("\n" + "="*70)
+    print(f"Using device: {device}")
     print("RTNTM COPY TASK TRAINING")
-    print("="*70)
-
-    #transformer heads: 4–8
-    #read heads:        1–2
-    #write heads:       1
 
     # Model configuration
-    emb_dim = 128
+    emb_dim = 200
     memory_N = 60
     n_heads = 4
     n_layers = 1
-    controller_window = 10
+    controller_window = 4
     read_heads = 1
     write_heads = 1
 
@@ -381,12 +368,13 @@ if __name__ == "__main__":
         read_heads=read_heads,
         write_heads=write_heads,
         shift_width=3,
-        dropout=0.1
+        state_layers=1,
+        dropout=0.0
     ).to(device)
 
     total_params = count_parameters(model)
     print(f"  Total parameters: {total_params:,}")
-    print()
+    print("="*70, "\n")
 
     # Training
     start_time = time.time()
@@ -396,8 +384,8 @@ if __name__ == "__main__":
         max_iters=50000,
         seq_len_start=1,
         seq_len_max=50,
-        batch_size=16,
-        lr=3e-4,
+        batch_size=32,
+        lr=1e-3,
         warmup_steps=1000,
         print_every=100,
         eval_every=500,

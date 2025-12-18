@@ -15,7 +15,7 @@ from random import randint
 from rtntm import RTNTM, count_parameters
 
 # Numerical vocab with explicit padding token
-vocab = string.digits + "+=" + "_"  # Add underscore as padding
+vocab = string.digits + "+= _" # Add underscore as padding
 vocab_len = len(vocab)
 char_to_idx = {ch: i for i, ch in enumerate(vocab)}
 idx_to_char = {i: ch for i, ch in enumerate(vocab)}
@@ -54,7 +54,7 @@ def generate_data(batch_len: int, num_len: int):
         # Create problem string in little-endian (reversed): "21+43="
         problem = f"{num1_str[::-1]}+{num2_str[::-1]}="
         # Answer string in little-endian (reversed): "64"
-        answer = f"{ans}"[::-1]
+        answer = f" {ans}"[::-1]
 
         problems.append(problem)
         answers.append(answer)
@@ -146,7 +146,7 @@ def train_until_converged(
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
 
-    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.01, betas=(0.9, 0.98))
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.0001, betas=(0.9, 0.98))
     scheduler = CosineAnnealingLR(optimizer, T_max=max_iters, eta_min=lr*0.1)
 
     model.train()
@@ -410,13 +410,14 @@ if __name__ == "__main__":
     print("="*70)
 
     # Model configuration
-    emb_dim = 128
-    memory_N = 50
-    n_heads = 4
+    emb_dim = 64
+    memory_N = 128
+    n_heads = 8
     n_layers = 1
-    controller_window = 10
+    controller_window = 8
     read_heads = 2
     write_heads = 1
+    state_layers = 1
 
     print(f"\nModel Configuration:")
     print(f"  Vocab: {vocab} (size={vocab_len})")
@@ -425,6 +426,7 @@ if __name__ == "__main__":
     print(f"  Transformer: {n_layers} layers, {n_heads} heads")
     print(f"  Controller window: {controller_window} (forces external memory use)")
     print(f"  Read heads: {read_heads}, Write heads: {write_heads}")
+    print(f"  State layers: {state_layers}")
 
     model = RTNTM(
         vocab_size=vocab_len,
@@ -436,6 +438,7 @@ if __name__ == "__main__":
         read_heads=read_heads,
         write_heads=write_heads,
         shift_width=3,
+        state_layers=state_layers,
         dropout=0.1
     ).to(device)
 
