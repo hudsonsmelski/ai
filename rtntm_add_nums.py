@@ -146,7 +146,7 @@ def train_until_converged(
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
 
-    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.0001, betas=(0.9, 0.98))
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.0, betas=(0.9, 0.98))
     scheduler = CosineAnnealingLR(optimizer, T_max=max_iters, eta_min=lr*0.1)
 
     model.train()
@@ -397,27 +397,22 @@ def train_until_converged(
 
 
 if __name__ == "__main__":
-    print("="*70)
     print(f"Start time: {datetime.datetime.now()}")
-    print("="*70)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.set_default_device(device)
     print(f"\nUsing device: {device}")
-
-    print("\n" + "="*70)
     print("RTNTM ADDITION TASK (Little-Endian)")
-    print("="*70)
 
     # Model configuration
     emb_dim = 64
     memory_N = 128
     n_heads = 8
-    n_layers = 1
+    n_layers = 2
     controller_window = 8
     read_heads = 2
     write_heads = 1
-    state_layers = 1
+    state_layers = 2
 
     print(f"\nModel Configuration:")
     print(f"  Vocab: {vocab} (size={vocab_len})")
@@ -444,7 +439,7 @@ if __name__ == "__main__":
 
     total_params = count_parameters(model)
     print(f"  Total parameters: {total_params:,}")
-    print()
+    print("="*70)
 
     # Training
     start_time = time.time()

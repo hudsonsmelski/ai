@@ -4,10 +4,16 @@
      Greg Wayne, gregwayne@google.com
      Ivo Danihelka, danihelka@google.com
 
+2016 Hybrid computing using a neural network with dynamic external memory
+Alex Graves1*, Greg Wayne1*, Malcolm Reynolds1, Tim Harley1, Ivo Danihelka1, Agnieszka Grabska-Barwińska1,
+Sergio Gómez Colmenarejo1, Edward Grefenstette1, Tiago Ramalho 1, John Agapiou1, Adrià Puigdomènech Badia1,
+Karl Moritz Hermann1, Yori Zwols1, Georg Ostrovski1, Adam Cain1, Helen King1, Christopher Summerfield1, Phil Blunsom1,
+Koray Kavukcuoglu1 & Demis Hassabis1
+
 Hudson Andrew Smelski
 
-RTNTM
-Transformer controller for NTM
+RTDNC
+Transformer controller for DNC
 """
 
 import string
@@ -165,6 +171,7 @@ class RTNTM(nn.Module):
         self.shift_K = shift_width
         self.half_shift = shift_width // 2
         self.window = controller_window
+        self.usage_decay = 0.99
 
         # Input embedding
         self.embedding = CNNEmbedding(vocab_size, emb_dim)
@@ -188,11 +195,13 @@ class RTNTM(nn.Module):
         self.token_head = nn.Linear(self.D, vocab_size)
 
         # Read head: projects controller output to NTM read parameters
-        self.read_param_len = self.M + 1 + 1 + self.shift_K + 1
+        #self.read_param_len = self.M + 1 + 1 + self.shift_K + 1
+        self.read_param_len = self.M + 1 + 1 + self.shift_K + 1 + 1 + 1 + 1
         self.read_head = nn.Linear(self.D, self.RH * self.read_param_len)
 
         # Write head: projects controller output to NTM write parameters
-        self.write_param_len = self.M + 1 + 1 + self.shift_K + 1 + self.M + self.M
+        #self.write_param_len = self.M + 1 + 1 + self.shift_K + 1 + self.M + self.M
+        self.write_param_len = self.M + 1 + 1 + self.shift_K + 1 + self.M + self.M + 1
         self.write_head = nn.Linear(self.D, self.WH * self.write_param_len)
 
         # Initialize memory to zeros
@@ -205,6 +214,9 @@ class RTNTM(nn.Module):
 
         # Memory: [batch, N, M]
         self.memory = self.memory_initial.unsqueeze(0).repeat(batch_size, 1, 1).clone()
+        self.link_matrix = torch.zeros(batch_size, self.N, self.N, device=device)
+        self.precedence = torch.zeros(batch_size, self.N, device=device)
+        self.usage = torch.zeros(batch_size, self.N, device=device)
 
         # Read/write weights: [batch, RH/WH, N]
         read_w = torch.zeros(batch_size, self.RH, self.N, device=device)
@@ -216,9 +228,8 @@ class RTNTM(nn.Module):
         self.write_w = write_w
 
         self.hx = torch.zeros(self.state_layers, batch_size, self.D, device=device)
-        self.input_history = None#torch.zeros(self.window, batch_size, self.D, device = device)
+        self.input_history = None
 
-    #TODO: We want to upgrade to DNC style memory addressing, and if we can, even better.
     def addressing(self, key, beta, gate, shift, gamma, prev_w, memory) -> torch.Tensor:
         """NTM addressing mechanism"""
         eps = 1e-12
@@ -250,21 +261,132 @@ class RTNTM(nn.Module):
 
         return wt
 
-    def step(self, x_t: torch.Tensor) -> torch.Tensor:
+    def allocate_memory(self, usage, write_gate):
         """
-        Single timestep forward pass.
+        Find free memory locations based on usage.
 
         Args:
-            x_t: [batch] token indices
+            usage: [batch, N] - how much each slot has been used
+            write_gate: [batch, 1] - scalar gating allocation vs content addressing
 
         Returns:
-            logits: [batch, vocab_size] - next token predictions
-            new_state: updated state dict
+            allocation_weights: [batch, N] - where to allocate new writes
+        """
+        # Sort by usage (ascending - least used first)
+        sorted_usage, free_list = torch.sort(usage, dim=-1, descending=False)
+
+        # Allocation weight is higher for less-used locations
+        # Use cumulative product to ensure we fill sequentially
+        shifted_usage = torch.cat([
+            torch.zeros_like(usage[:, :1]),
+            sorted_usage[:, :-1]
+        ], dim=-1)
+
+        allocation_weights = (1 - sorted_usage) * torch.cumprod(shifted_usage, dim=-1)
+
+        # Scatter back to original indices
+        batch_size = usage.shape[0]
+        allocation_result = torch.zeros_like(usage)
+        for b in range(batch_size):
+            allocation_result[b].scatter_(0, free_list[b], allocation_weights[b])
+
+        return allocation_result
+
+    def temporal_link_addressing(self, link_matrix, read_w, forward=True):
+        """
+        Follow temporal links from current read position.
+
+        Args:
+            link_matrix: [batch, N, N] - L[i,j] = strength of link from i to j
+            read_w: [batch, N] - current read weights
+            forward: if True, read forward links; if False, read backward
+
+        Returns:
+            linked_weights: [batch, N] - weights after following links
+        """
+        if forward:
+            # Forward: which locations were written AFTER current position
+            # link_matrix[i,j] means j was written after i
+            linked = torch.bmm(read_w.unsqueeze(1), link_matrix).squeeze(1)
+        else:
+            # Backward: which locations were written BEFORE current position
+            # Transpose to get link_matrix[j,i] = i was written before j
+            linked = torch.bmm(read_w.unsqueeze(1), link_matrix.transpose(1, 2)).squeeze(1)
+
+        return linked
+
+    def update_temporal_links(self, write_w, prev_precedence):
+        """
+        Update temporal link matrix based on write order.
+
+        Args:
+            write_w: [batch, N] - current write weights
+            prev_precedence: [batch, N] - previous precedence weights
+
+        Returns:
+            new_link_matrix: [batch, N, N]
+            new_precedence: [batch, N]
+        """
+        # Decay old links where we're writing
+        # If we write to location i, all links i->j should be reset
+        link_matrix = (1 - write_w.unsqueeze(-1)) * self.link_matrix
+
+        # Add new links: current write comes after all previous writes
+        # link_matrix[i,j] += prev_precedence[i] * write_w[j]
+        # Meaning: if i had precedence before, and we're writing to j now,
+        # then j comes after i
+        link_matrix = link_matrix + torch.bmm(
+            prev_precedence.unsqueeze(-1),
+            write_w.unsqueeze(1)
+        )
+
+        # Ensure no self-links and symmetry constraints
+        eye = torch.eye(self.N, device=link_matrix.device).unsqueeze(0)
+        link_matrix = link_matrix * (1 - eye)
+
+        # Update precedence: current write becomes new precedence
+        # Decay old precedence where we're writing
+        new_precedence = (1 - write_w.sum(dim=0, keepdim=True)) * prev_precedence + write_w
+
+        return link_matrix, new_precedence
+
+    def update_usage(self, write_w, read_w):
+        """
+        Update memory usage based on reads and writes.
+
+        Args:
+            write_w: [batch, WH, N] or [batch, N] - write weights
+            read_w: [batch, RH, N] or [batch, N] - read weights
+
+        Returns:
+            new_usage: [batch, N]
+        """
+        # Decay existing usage
+        usage = self.usage_decay * self.usage
+
+        # Flatten head dimensions if present
+        if write_w.dim() == 3:
+            write_contribution = write_w.sum(dim=1)  # Sum over write heads
+        else:
+            write_contribution = write_w
+
+        if read_w.dim() == 3:
+            read_contribution = read_w.sum(dim=1)  # Sum over read heads
+        else:
+            read_contribution = read_w
+
+        # Writing and reading both increase usage
+        usage = usage + write_contribution + read_contribution
+
+        # Clip to [0, 1]
+        return torch.clamp(usage, 0, 1)
+
+    def step(self, x_t: torch.Tensor) -> torch.Tensor:
+        """
+         x_t: [batch] token indices
         """
         batch = x_t.shape[0]
-        device = x_t.device
 
-        # Embed input token
         input_emb = self.embedding(x_t)  # [batch, d_model]
 
         read_vecs = []
@@ -272,13 +394,10 @@ class RTNTM(nn.Module):
             w = self.read_w[:, h, :].unsqueeze(1)  # [batch, 1, N]
             r = torch.bmm(w, self.memory).squeeze(1)  # [batch, M]
             read_vecs.append(r)
-            #read_vecs.append(self.read_projection(r))
         read_vecs = torch.stack(read_vecs, dim = 0) # [RH, batch, M]
 
-        # Controller forward: transformer over [input_history + projected_reads]
         controller_out, self.input_history = self.controller.forward_step(
-            input_emb, self.input_history, read_vecs, self.hx)
-        # controller_out: [batch, d_model]
+            input_emb, self.input_history, read_vecs, self.hx) # controller_out: [batch, d_model]
 
         output, self.hx = self.state_update(controller_out.unsqueeze(0), self.hx)
         output = self.controller_out_norm(controller_out + output.squeeze()) #[batch, D]
@@ -299,9 +418,31 @@ class RTNTM(nn.Module):
             gate = rp[:, idx:idx + 1]; idx += 1
             shift = rp[:, idx:idx + self.shift_K]; idx += self.shift_K
             gamma = rp[:, idx:idx + 1]; idx += 1
+            alloc_gate = rp[:, idx:idx + 1]; idx += 1  # NEW
+            forward_strength = rp[:, idx:idx + 1]; idx += 1  # NEW
+            backward_strength = rp[:, idx:idx + 1]; idx += 1  # NEW
 
             prev_w = self.read_w[:, h, :]
-            wt = self.addressing(key, beta, gate, shift, gamma, prev_w, self.memory)
+
+            # Content-based addressing
+            wt_content = self.addressing(key, beta, gate, shift, gamma, prev_w, self.memory)
+
+            # Temporal link addressing
+            forward_w = self.temporal_link_addressing(self.link_matrix, prev_w, forward=True)
+            backward_w = self.temporal_link_addressing(self.link_matrix, prev_w, forward=False)
+
+            # Combine all three addressing modes
+            f_strength = torch.sigmoid(forward_strength).squeeze(-1)
+            b_strength = torch.sigmoid(backward_strength).squeeze(-1)
+            content_strength = 1 - f_strength - b_strength
+
+            wt = (content_strength.unsqueeze(-1) * wt_content +
+                  f_strength.unsqueeze(-1) * forward_w +
+                  b_strength.unsqueeze(-1) * backward_w)
+
+            # Normalize
+            wt = wt / (wt.sum(dim=-1, keepdim=True) + 1e-12)
+
             new_read_w.append(wt)
 
         self.read_w = torch.stack(new_read_w, dim=1)
@@ -322,9 +463,20 @@ class RTNTM(nn.Module):
             gamma = wp[:, idx:idx + 1]; idx += 1
             erase = wp[:, idx:idx + self.M]; idx += self.M
             add = wp[:, idx:idx + self.M]; idx += self.M
+            alloc_gate = wp[:, idx:idx + 1]; idx += 1  # NEW
 
             prev_w = self.write_w[:, h, :]
-            wt = self.addressing(key, beta, gate, shift, gamma, prev_w, mem)
+
+            # Content-based write location
+            wt_content = self.addressing(key, beta, gate, shift, gamma, prev_w, mem)
+
+            # Allocation-based write location
+            wt_alloc = self.allocate_memory(self.usage, alloc_gate)
+
+            # Blend content and allocation addressing
+            a_gate = torch.sigmoid(alloc_gate).squeeze(-1)
+            wt = a_gate.unsqueeze(-1) * wt_alloc + (1 - a_gate.unsqueeze(-1)) * wt_content
+
             new_write_w.append(wt)
 
             # Erase and add
@@ -339,6 +491,12 @@ class RTNTM(nn.Module):
 
         self.memory = mem
         self.write_w = torch.stack(new_write_w, dim=1)
+
+        write_w_combined = self.write_w.mean(dim=1)  # [batch, N]
+        self.link_matrix, self.precedence = self.update_temporal_links(
+            write_w_combined, self.precedence
+        )
+        self.usage = self.update_usage(self.write_w, self.read_w)
 
         return logits
 

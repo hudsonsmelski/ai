@@ -13,7 +13,7 @@ import string
 import math
 from random import randint
 
-from rtntm import *
+from rtdnc import *
 
 def generate_copy_batch(batch_size, seq_len, vocab_size, device):
     """

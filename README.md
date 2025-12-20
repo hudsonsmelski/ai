@@ -295,75 +295,36 @@ I'd love to figure out a way to give the transformer context which represents th
 
 ```
 > python rtntm_copy_task.py
-======================================================================
-Start time: 2025-12-14 23:05:38.240633
-======================================================================
-
-Using device: cuda
-
-======================================================================
-RTNTM COPY TASK TRAINING
-======================================================================
-
-Model Configuration:
-  Vocab size: 100
-  Embedding dimension: 200
-  Memory: 60 × 200
-  Transformer: 1 layers, 2 heads
-  Controller window: 4
-  Read heads: 1, Write heads: 1
-  Total parameters: 1,578,162
-  
-...
-
-======================================================================
-=== TRAINING COMPLETE ===
-Reached acc=100.00% and loss=0.0021
-at max seq_len=50
-======================================================================
-
->>> Final model saved to: ./models_rtntm/rtntm_copy_final.pt
->>> Best model (acc=2.63%, loss=6.5686) at: ./models_rtntm/rtntm_copy_best.pt
-
-======================================================================
-TRAINING FINISHED
-Final model: ./models_rtntm/rtntm_copy_final.pt
-Total time: 1.97 minutes (0.03 hours)
-======================================================================
-
-End time: 2025-12-14 23:07:36.857425
-======================================================================
-
-> python rtntm_copy_task.py
-Start time: 2025-12-18 00:53:38.960121
+Start time: 2025-12-18 23:37:12.853728
 Using device: cuda
 RTNTM COPY TASK TRAINING
 
 Model Configuration:
   Vocab size: 100
-  Embedding dimension: 200
-  Memory: 60 × 200
+  Embedding dimension: 104
+  Memory: 60 × 104
   Transformer: 1 layers, 4 heads
   Controller window: 4
   Read heads: 1, Write heads: 1
-  Total parameters: 913,362
+  Total parameters: 262,818
+======================================================================
   
 ======================================================================
 === TRAINING COMPLETE ===
-Reached acc=100.00% and loss=0.0089
+Reached acc=100.00% and loss=0.0035
 at max seq_len=50
 ======================================================================
 
 >>> Final model saved to: ./models_rtntm/rtntm_copy_final.pt
->>> Best model (acc=2.06%, loss=10.0097) at: ./models_rtntm/rtntm_copy_best.pt
+>>> Best model (acc=1.60%, loss=5.0041) at: ./models_rtntm/rtntm_copy_best.pt
 
 ======================================================================
 TRAINING FINISHED
 Final model: ./models_rtntm/rtntm_copy_final.pt
-Total time: 3.32 minutes (0.06 hours)
+Total time: 3.22 minutes (0.05 hours)
 ======================================================================
 
-End time: 2025-12-18 00:56:58.403280
+End time: 2025-12-18 23:40:26.248891
 ======================================================================
 ```
 
@@ -374,7 +335,7 @@ End time: 2025-12-18 00:56:58.403280
 ```
 > python rtntm_add_nums.py
 ======================================================================
-Start time: 2025-12-16 11:19:33.480771
+Start time: 2025-12-18 14:02:27.529949
 ======================================================================
 
 Using device: cuda
@@ -387,26 +348,92 @@ Model Configuration:
   Vocab: 0123456789+= _ (size=14)
   Embedding dimension: 64
   Memory: 128 × 64
-  Transformer: 1 layers, 2 heads
-  Controller window: 5 (forces external memory use)
+  Transformer: 1 layers, 8 heads
+  Controller window: 8 (forces external memory use)
   Read heads: 2, Write heads: 1
-  Total parameters: 202,871
+  State layers: 1
+  Total parameters: 97,143
   
 ...
 
 ======================================================================
 Reached target num_len=20
-CharAcc=1.0000, SeqAcc=1.0000, Loss=0.0065
+CharAcc=1.0000, SeqAcc=1.0000, Loss=0.0062
 ======================================================================
 
 ======================================================================
 TRAINING FINISHED
 Final model: ./models_rtntm_add/rtntm_add_littleendian_final.pt
-Total time: 51.35 minutes (0.86 hours)
+Total time: 46.55 minutes (0.78 hours)
 ======================================================================
 
-End time: 2025-12-16 12:10:54.945041
+End time: 2025-12-18 14:49:00.927215
+======================================================================
+```
+
+```
+> python rtntm_add_nums.py
+Start time: 2025-12-18 17:22:47.630865
+
+Using device: cuda
+RTNTM ADDITION TASK (Little-Endian)
+
+Model Configuration:
+  Vocab: 0123456789+= _ (size=14)
+  Embedding dimension: 104
+  Memory: 128 × 104
+  Transformer: 1 layers, 4 heads
+  Controller window: 8 (forces external memory use)
+  Read heads: 2, Write heads: 1
+  State layers: 1
+  Total parameters: 251,363
 ======================================================================
 
+======================================================================
+Reached target num_len=20
+CharAcc=1.0000, SeqAcc=1.0000, Loss=0.0054
+======================================================================
 
+======================================================================
+TRAINING FINISHED
+Final model: ./models_rtntm_add/rtntm_add_littleendian_final.pt
+Total time: 24.08 minutes (0.40 hours)
+======================================================================
+
+End time: 2025-12-18 17:46:52.736718
+======================================================================
+```
+
+```
+> python rtntm_add_nums.py
+Start time: 2025-12-18 21:44:36.719024
+
+Using device: cuda
+RTNTM ADDITION TASK (Little-Endian)
+
+Model Configuration:
+  Vocab: 0123456789+= _ (size=14)
+  Embedding dimension: 200
+  Memory: 128 × 200
+  Transformer: 2 layers, 4 heads
+  Controller window: 8 (forces external memory use)
+  Read heads: 2, Write heads: 1
+  State layers: 1
+  Total parameters: 1,397,851
+
+...
+
+======================================================================
+Reached target num_len=20
+CharAcc=1.0000, SeqAcc=1.0000, Loss=0.0055
+======================================================================
+
+======================================================================
+TRAINING FINISHED
+Final model: ./models_rtntm_add/rtntm_add_littleendian_final.pt
+Total time: 20.88 minutes (0.35 hours)
+======================================================================
+
+End time: 2025-12-18 22:05:29.984691
+======================================================================
 ```
