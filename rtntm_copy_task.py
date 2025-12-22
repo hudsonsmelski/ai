@@ -17,57 +17,54 @@ from rtntm import *
 
 def generate_copy_batch(batch_size, seq_len, vocab_size, device):
     """
-    Generate copy task batch where each sequence has a random length.
-    Input: [seq] [delimiter] [blanks] (padded to consistent length)
-    Target: the original sequence (to be output during blank period)
-
+    Generate copy task batch with random sequence lengths.
+    Input:  [seq] [delimiter] [blanks]
+    Target: [ignore] [ignore] [seq]  (predict during blank period)
     Returns:
-        input_indices: [max_total_len, batch] - token indices
-        target_seq: [max_seq_len, batch] - target tokens to predict (0-padded)
-        seq_lengths: [batch] - actual length of each sequence
+        input_seq: [max_total_len, batch] - input tokens
+        target_seq: [max_total_len, batch] - target tokens (SAME length as input!)
+        mask: [max_total_len, batch] - 1 where we compute loss, 0 elsewhere
     """
-    # Random length for each sequence in the batch
+    # Random lengths between 1 and seq_len for each sequence in batch
     seq_lengths = torch.randint(1, seq_len + 1, (batch_size,), device=device)
-    max_len = seq_lengths.max().item()
 
-    # Total input length: seq + delimiter + blanks for recall
-    max_total_len = 2 * max_len + 1
+    # Max total length based on longest possible sequence
+    max_total_len = 2 * seq_len + 1
 
-    # Initialize tensors
-    input_indices = torch.zeros(max_total_len, batch_size, dtype=torch.long, device=device)
-    target_seq = torch.zeros(max_len, batch_size, dtype=torch.long, device=device)
-
+    # Reserve token IDs properly
     delimiter_idx = vocab_size - 1
+    blank_idx = vocab_size - 2  # Separate token for "blank/recall mode"
+    usable_vocab = vocab_size - 2  # Don't use delimiter or blank in sequences
+
+    # Initialize
+    input_seq = torch.zeros(max_total_len, batch_size, dtype=torch.long, device=device)
+    target_seq = torch.zeros(max_total_len, batch_size, dtype=torch.long, device=device)
+    mask = torch.zeros(max_total_len, batch_size, dtype=torch.bool, device=device)
 
     for i in range(batch_size):
-        length = seq_lengths[i].item()
+        curr_len = seq_lengths[i].item()
 
-        # Generate random sequence
-        seq = torch.randint(0, vocab_size - 1, (length,), device=device)
+        # Generate random sequence (avoid delimiter and blank tokens)
+        seq = torch.randint(0, usable_vocab, (curr_len,), device=device)
 
-        # Build input: [seq, delimiter, blanks]
-        input_indices[:length, i] = seq
-        input_indices[length, i] = delimiter_idx
-        # Blanks are already zeros from initialization
+        # Input: [seq, delimiter, blanks...]
+        input_seq[:curr_len, i] = seq
+        input_seq[curr_len, i] = delimiter_idx
+        input_seq[curr_len+1:curr_len+1+curr_len, i] = blank_idx  # Explicit blank token
 
-        # Store target (the sequence to copy)
-        target_seq[:length, i] = seq
+        # Target: [don't care, don't care, seq to predict]
+        target_seq[curr_len+1:curr_len+1+curr_len, i] = seq  # Predict during recall period
 
-    return input_indices, target_seq, seq_lengths
+        # Mask: only compute loss during recall period
+        mask[curr_len+1:curr_len+1+curr_len, i] = True
+
+    return input_seq, target_seq, mask
 
 
 def evaluate_copy_accuracy(predictions, targets, seq_lengths):
-    """
-    predictions: [max_len, batch, vocab_size] - logits
-    targets: [max_len, batch] - token indices
-    seq_lengths: [batch] - actual sequence lengths
-    """
     pred_tokens = torch.argmax(predictions, dim=-1)
-
-    # Create mask for valid positions
     max_len = predictions.shape[0]
     mask = torch.arange(max_len, device=predictions.device).unsqueeze(1) < seq_lengths.unsqueeze(0)
-
     correct = ((pred_tokens == targets) & mask).float().sum() / mask.sum()
     return correct.item()
 
@@ -112,50 +109,49 @@ def train_copy_task_until_converged(
                 param_group['lr'] = lr * lr_scale
 
         # Generate batch
-        input_indices, target_seq, seq_lengths = generate_copy_batch(
-            batch_size, current_seq_len, vocab_size, device)
+        input_seq, target_seq, mask = generate_copy_batch(batch_size, current_seq_len, vocab_size, device)
 
         # Initialize state
         model.init_state(batch_size=batch_size, device=device)
 
         # Forward pass through full sequence
         all_logits = model.forward(
-            input_indices,
+            input_seq,
             return_all_logits=True
-        )
+        )  # [total_len, batch, vocab_size]
 
-        # Extract predictions for the "recall" period
-        max_len = seq_lengths.max().item()
-        pred_logits = all_logits[-max_len:, :, :]  # [max_len, batch, vocab_size]
+        # mask is [total_len, batch], find where it's True
+        recall_start = current_seq_len + 1  # After seq + delimiter
+        pred_logits = all_logits[recall_start:, :, :]  # [seq_len, batch, vocab_size]
+        pred_targets = target_seq[recall_start:, :]  # [seq_len, batch]
+        pred_mask = mask[recall_start:, :]  # [seq_len, batch]
 
-        # Create mask for valid positions (to ignore padding in loss)
-        mask = torch.arange(max_len, device=device).unsqueeze(1) < seq_lengths.unsqueeze(0)
-        mask = mask.float()  # [max_len, batch]
-
-        # Compute loss only on valid (non-padded) positions
+        # Compute loss only on valid positions
         loss = F.cross_entropy(
-            pred_logits.reshape(-1, vocab_size),
-            target_seq.reshape(-1),
+            pred_logits.reshape(-1, vocab_size),  # [seq_len*batch, vocab_size]
+            pred_targets.reshape(-1),  # [seq_len*batch]
             reduction='none'
         )
-        loss = loss.view(max_len, batch_size)
-        loss = (loss * mask).sum() / mask.sum()  # Masked average
+        loss = loss.view(current_seq_len, batch_size)  # [seq_len, batch]
 
-        # Optional: Add regularization on memory attention (encourage sharpness)
+        # Apply mask (though with fixed lengths, mask should be all True in recall period)
+        loss = (loss * pred_mask.float()).sum() / pred_mask.float().sum()
+
+        # Optional: Add regularization on memory attention
         read_w = model.read_w  # [batch, RH, N]
         write_w = model.write_w  # [batch, WH, N]
 
         eps = 1e-8
         read_entropy = -(read_w * (read_w + eps).log()).sum(-1).mean()
         write_entropy = -(write_w * (write_w + eps).log()).sum(-1).mean()
-        entropy_reg = 0.01 * (read_entropy + write_entropy)
+        entropy_reg = 0.001 * (read_entropy + write_entropy)  # Reduced weight
 
         total_loss = loss + entropy_reg
 
         # Backward pass
         optimizer.zero_grad()
         total_loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)  # Increased from 1.0
         optimizer.step()
 
         if it > warmup_steps:
@@ -164,16 +160,19 @@ def train_copy_task_until_converged(
         loss_val = loss.item()
         loss_history.append(loss_val)
 
-        # Training accuracy
+        # Training accuracy - FIXED
         with torch.no_grad():
-            acc = evaluate_copy_accuracy(pred_logits, target_seq, seq_lengths)
+            pred_tokens = torch.argmax(pred_logits, dim=-1)  # [seq_len, batch]
+            correct = (pred_tokens == pred_targets).float()
+            acc = (correct * pred_mask.float()).sum() / pred_mask.float().sum()
+            acc = acc.item()
 
         # Evaluation
         if it % eval_every == 0:
             model.eval()
             with torch.no_grad():
                 eval_seq_len = min(current_seq_len + 5, seq_len_max)
-                input_eval, target_eval, eval_seq_lengths = generate_copy_batch(
+                input_eval, target_eval, eval_mask = generate_copy_batch(
                     batch_size, eval_seq_len, vocab_size, device
                 )
 
@@ -183,25 +182,28 @@ def train_copy_task_until_converged(
                     return_all_logits=True
                 )
 
-                # Extract predictions for eval
-                eval_max_len = eval_seq_lengths.max().item()
-                pred_eval = outputs_eval[-eval_max_len:, :, :]
-
-                # Create eval mask
-                eval_mask = torch.arange(eval_max_len, device=device).unsqueeze(1) < eval_seq_lengths.unsqueeze(0)
-                eval_mask = eval_mask.float()
+                # Extract recall period - FIXED
+                eval_recall_start = eval_seq_len + 1
+                pred_eval = outputs_eval[eval_recall_start:, :, :]  # [eval_seq_len, batch, vocab_size]
+                target_eval_recall = target_eval[eval_recall_start:, :]  # [eval_seq_len, batch]
+                mask_eval_recall = eval_mask[eval_recall_start:, :]  # [eval_seq_len, batch]
 
                 # Compute eval loss
                 eval_loss_raw = F.cross_entropy(
                     pred_eval.reshape(-1, vocab_size),
-                    target_eval.reshape(-1),
+                    target_eval_recall.reshape(-1),
                     reduction='none'
                 )
-                eval_loss_raw = eval_loss_raw.view(eval_max_len, batch_size)
-                eval_loss = (eval_loss_raw * eval_mask).sum() / eval_mask.sum()
+                eval_loss_raw = eval_loss_raw.view(eval_seq_len, batch_size)
+                eval_loss = (eval_loss_raw * mask_eval_recall.float()).sum() / mask_eval_recall.float().sum()
                 eval_loss = eval_loss.item()
 
-                eval_acc = evaluate_copy_accuracy(pred_eval, target_eval, eval_seq_lengths)
+                # Eval accuracy - FIXED
+                pred_tokens_eval = torch.argmax(pred_eval, dim=-1)
+                correct_eval = (pred_tokens_eval == target_eval_recall).float()
+                eval_acc = (correct_eval * mask_eval_recall.float()).sum() / mask_eval_recall.float().sum()
+                eval_acc = eval_acc.item()
+
                 stats = model.get_memory_usage_stats()
 
                 print(f"\n{'='*70}")
@@ -211,14 +213,12 @@ def train_copy_task_until_converged(
                 print(f"Write Entropy   {stats['write_entropy']:.2f}")
                 print(f"Read Sharpness  {stats['read_sharpness']:.2f}")
                 print(f"Write Sharpness {stats['write_sharpness']:.2f}")
-                print(f"Hidden Mean     {stats['hx_mean']:.2f}")
 
-                # Show example (first in batch)
-                first_seq_len = eval_seq_lengths[0].item()
-                pred_tokens = torch.argmax(pred_eval[:first_seq_len, 0, :], dim=-1).cpu().tolist()
-                target_tokens = target_eval[:first_seq_len, 0].cpu().tolist()
-                pred_str = ''.join(idx_to_char.get(i, '?') for i in pred_tokens)
-                target_str = ''.join(idx_to_char.get(i, '?') for i in target_tokens)
+                # Show example (first in batch) - FIXED
+                pred_tokens_first = pred_tokens_eval[:, 0].cpu().tolist()
+                target_tokens_first = target_eval_recall[:, 0].cpu().tolist()
+                pred_str = ''.join(idx_to_char.get(i, '?') for i in pred_tokens_first)
+                target_str = ''.join(idx_to_char.get(i, '?') for i in target_tokens_first)
                 print(f"\n  Target:  {repr(target_str)}")
                 print(f"  Predict: {repr(pred_str)}")
                 print('='*70 + '\n')
@@ -261,13 +261,12 @@ def train_copy_task_until_converged(
                   f"GradNorm={grad_norm:.2f}, LR={optimizer.param_groups[0]['lr']:.2e}, "
                   f"Speed={iter_per_sec:.1f} it/s")
 
-            # Show training example (use actual sequence length from first item)
+            # Show training example - FIXED
             with torch.no_grad():
-                first_seq_len = seq_lengths[0].item()
-                pred_tokens = torch.argmax(pred_logits[:first_seq_len, 0, :], dim=-1).cpu().tolist()
-                target_tokens = target_seq[:first_seq_len, 0].cpu().tolist()
-                pred_str = ''.join(idx_to_char.get(i, '?') for i in pred_tokens)
-                target_str = ''.join(idx_to_char.get(i, '?') for i in target_tokens)
+                pred_tokens_first = pred_tokens[:, 0].cpu().tolist()
+                target_tokens_first = pred_targets[:, 0].cpu().tolist()
+                pred_str = ''.join(idx_to_char.get(i, '?') for i in pred_tokens_first)
+                target_str = ''.join(idx_to_char.get(i, '?') for i in target_tokens_first)
                 print(f"  T: {repr(target_str)} | P: {repr(pred_str)}")
 
         # Save checkpoint
@@ -383,7 +382,7 @@ if __name__ == "__main__":
         model,
         device=device,
         max_iters=50000,
-        seq_len_start=5,
+        seq_len_start=1,
         seq_len_max=50,
         batch_size=32,
         lr=1e-3,

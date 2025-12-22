@@ -231,6 +231,23 @@ Time: 13.79 min
 End time: 2025-12-08 18:32:09.67591
 ```
 
+```
+> python ntm_gru_copy_task.py
+Start time: 2025-12-21 21:33:51.754323
+Using device: cuda
+NTM BATCHED COPY TASK TRAINING
+Model Configuration:
+  Vocab: 0123456789abcdefghij (20)
+  Memory: 128 x 20
+  Controller: GRU
+  Total parameters: 155,712
+============================================================
+
+...
+
+
+```
+
 ### Repeat Copy Task
 
 ```
@@ -295,7 +312,7 @@ I'd love to figure out a way to give the transformer context which represents th
 
 ```
 > python rtntm_copy_task.py
-Start time: 2025-12-18 23:37:12.853728
+Start time: 2025-12-20 17:48:13.753064
 Using device: cuda
 RTNTM COPY TASK TRAINING
 
@@ -306,25 +323,59 @@ Model Configuration:
   Transformer: 1 layers, 4 heads
   Controller window: 4
   Read heads: 1, Write heads: 1
-  Total parameters: 262,818
+  Total parameters: 273,946
 ======================================================================
   
 ======================================================================
 === TRAINING COMPLETE ===
-Reached acc=100.00% and loss=0.0035
+Reached acc=100.00% and loss=0.0060
 at max seq_len=50
 ======================================================================
 
 >>> Final model saved to: ./models_rtntm/rtntm_copy_final.pt
->>> Best model (acc=1.60%, loss=5.0041) at: ./models_rtntm/rtntm_copy_best.pt
+>>> Best model (acc=3.65%, loss=4.6351) at: ./models_rtntm/rtntm_copy_best.pt
 
 ======================================================================
 TRAINING FINISHED
 Final model: ./models_rtntm/rtntm_copy_final.pt
-Total time: 3.22 minutes (0.05 hours)
+Total time: 0.94 minutes (0.02 hours)
 ======================================================================
 
-End time: 2025-12-18 23:40:26.248891
+End time: 2025-12-20 17:49:10.427404
+======================================================================
+
+
+> python rtntm_copy_task.py
+Start time: 2025-12-20 21:38:45.266541
+Using device: cuda
+RTNTM COPY TASK TRAINING
+
+Model Configuration:
+  Vocab size: 100
+  Embedding dimension: 200
+  Memory: 60 × 200
+  Transformer: 1 layers, 4 heads
+  Controller window: 4
+  Read heads: 1, Write heads: 1
+  Total parameters: 953,962
+======================================================================
+...
+======================================================================
+=== TRAINING COMPLETE ===
+Reached acc=100.00% and loss=0.0056
+at max seq_len=50
+======================================================================
+
+>>> Final model saved to: ./models_rtntm/rtntm_copy_final.pt
+>>> Best model (acc=99.37%, loss=0.0426) at: ./models_rtntm/rtntm_copy_best.pt
+
+======================================================================
+TRAINING FINISHED
+Final model: ./models_rtntm/rtntm_copy_final.pt
+Total time: 0.65 minutes (0.01 hours)
+======================================================================
+
+End time: 2025-12-20 21:39:24.333259
 ======================================================================
 ```
 
@@ -435,5 +486,27 @@ Total time: 20.88 minutes (0.35 hours)
 ======================================================================
 
 End time: 2025-12-18 22:05:29.984691
+======================================================================
+```
+
+## RTDNC
+
+### Add numbers
+
+```
+> python rtdnc_add_nums.py
+Start time: 2025-12-20 19:22:19.081879
+
+Using device: cuda
+
+Model Configuration:
+  Vocab: 0123456789+= _ (size=14)
+  Embedding dimension: 64
+  Memory: 128 × 64
+  Transformer: 2 layers, 8 heads
+  Controller window: 16 (forces external memory use)
+  Read heads: 4, Write heads: 1
+  State layers: 2
+ Total parameters: 186,320
 ======================================================================
 ```

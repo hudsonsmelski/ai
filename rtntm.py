@@ -8,6 +8,9 @@ Hudson Andrew Smelski
 
 RTNTM
 Transformer controller for NTM
+
+TODO: How to make a model with the ability to store and read vectors (in an embedding space)
+ and also view into short and long term memory, as well as have access to a mutable state.
 """
 
 import string
@@ -17,28 +20,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Any, Tuple, Optional
 
-#TODO, hook up with larger kernel size for input sequences
 class CNNEmbedding(nn.Module):
     def __init__(self, vocab_size, emb_dim):
         super().__init__()
         self.vocab_size = vocab_size
 
-        # One-hot to embedding via convolutions
         intermediate = (vocab_size + emb_dim)//2
         self.l1 = nn.Conv1d(vocab_size, intermediate, kernel_size=1)
         self.l2 = nn.Conv1d(intermediate, emb_dim, kernel_size=1)
-        self.bn1 = nn.BatchNorm1d(intermediate)
-        self.bn2 = nn.BatchNorm1d(emb_dim)
+
+        self.ln1 = nn.LayerNorm(intermediate)
+        self.ln2 = nn.LayerNorm(emb_dim)
 
     def forward(self, x_t):
-        # x_t: [batch] token indices
-        # Convert to one-hot
-        one_hot = F.one_hot(x_t, num_classes=self.vocab_size).float()  # [batch, vocab]
+        one_hot = F.one_hot(x_t, num_classes=self.vocab_size).float()
         one_hot = one_hot.unsqueeze(-1)  # [batch, vocab, 1]
 
-        x = F.gelu(self.bn1(self.l1(one_hot)))
-        x = F.gelu(self.bn2(self.l2(x)))
-        return x.squeeze(-1)  # [batch, emb_dim]
+        x = self.l1(one_hot)  # [batch, intermediate, 1]
+        x = x.squeeze(-1)  # [batch, intermediate]
+        x = F.gelu(self.ln1(x))
+        x = x.unsqueeze(-1)  # [batch, intermediate, 1]
+
+        x = self.l2(x)  # [batch, emb_dim, 1]
+        x = x.squeeze(-1)  # [batch, emb_dim]
+        x = F.gelu(self.ln2(x))
+
+        return x
 
 class PositionalEncoding(nn.Module):
     """
@@ -218,7 +225,6 @@ class RTNTM(nn.Module):
         self.hx = torch.zeros(self.state_layers, batch_size, self.D, device=device)
         self.input_history = None#torch.zeros(self.window, batch_size, self.D, device = device)
 
-    #TODO: We want to upgrade to DNC style memory addressing, and if we can, even better.
     def addressing(self, key, beta, gate, shift, gamma, prev_w, memory) -> torch.Tensor:
         """NTM addressing mechanism"""
         eps = 1e-12
@@ -266,6 +272,9 @@ class RTNTM(nn.Module):
 
         # Embed input token
         input_emb = self.embedding(x_t)  # [batch, d_model]
+        if torch.isnan(input_emb).any():
+            print("NaN detected in input_emb!")
+            exit()
 
         read_vecs = []
         for h in range(self.RH):
@@ -491,7 +500,7 @@ if __name__ == "__main__":
     print("="*70)
 
     model.init_state(batch_size=batch, device=device)
-    all_logits, final_state = model.forward(token_seq, return_all_logits=True)
+    all_logits = model.forward(token_seq, return_all_logits=True)
 
     print(f"Input shape:  {token_seq.shape}")
     print(f"Output shape: {all_logits.shape}")
