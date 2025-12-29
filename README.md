@@ -233,19 +233,35 @@ End time: 2025-12-08 18:32:09.67591
 
 ```
 > python ntm_gru_copy_task.py
-Start time: 2025-12-21 21:33:51.754323
+Start time: 2025-12-27 21:19:10.821011
 Using device: cuda
 NTM BATCHED COPY TASK TRAINING
 Model Configuration:
   Vocab: 0123456789abcdefghij (20)
   Memory: 128 x 20
   Controller: GRU
-  Total parameters: 155,712
+  Controller width: 100
+  Controller depth: 1
+  Total parameters: 48,312
 ============================================================
 
 ...
 
+============================================================
+=== TRAINING COMPLETE ===
+Reached acc=100.00% and loss=0.0490 at max seq_len=20
+============================================================
 
+>>> Final model saved to: ./models/ntm_copy_final.pt
+>>> Best model (acc=94.53%) saved to: ./models/ntm_copy_best.pt
+
+============================================================
+TRAINING FINISHED
+Final model: ./models/ntm_copy_final.pt
+Time: 2.68 min
+============================================================
+
+End time: 2025-12-27 21:21:51.714099
 ```
 
 ### Repeat Copy Task
@@ -296,7 +312,38 @@ Final model: ./models_repeat/ntm_repeat_copy_final.pt
 
 ## DNC
 
-TODO: for temporal and dynamic memory
+We have the DNC up and working but it appears slow.
+
+```
+> python dnc_copy_task.py
+Start time: 2025-12-28 18:54:47.395143
+Using device: cuda
+DNC COPY TASK TRAINING
+Model Configuration:
+  Vocab: 0123456789abcdefghij (20)
+  Memory: 128 x 20
+  Controller: GRU
+  Controller width: 200
+  Controller depth: 2
+  Total parameters: 408,948
+============================================================
+...
+============================================================
+=== TRAINING COMPLETE ===
+Reached acc=99.69% and loss=0.0466 at max seq_len=20
+============================================================
+
+>>> Final model saved to: ./models/ntm_copy_final.pt
+>>> Best model (acc=92.66%) saved to: ./models/ntm_copy_best.pt
+
+============================================================
+TRAINING FINISHED
+Final model: ./models/ntm_copy_final.pt
+Time: 26.96 min
+============================================================
+
+End time: 2025-12-28 19:21:45.475475
+```
 
 ## RTNTM
 
@@ -490,6 +537,8 @@ End time: 2025-12-18 22:05:29.984691
 ```
 
 ## RTDNC
+
+Probably hot garbage. DO DNC FIRST THEN RTDNC!
 
 ### Add numbers
 

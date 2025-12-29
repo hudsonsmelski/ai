@@ -1,4 +1,4 @@
-# Training script for the NTM on 4.1 Copy task from the NTM paper
+# Training script for the DNC on 4.1 Copy task from the NTM paper
 # Hudson Andrew Smelski
 
 import os
@@ -11,7 +11,7 @@ import datetime
 from collections import deque
 import string
 
-from ntm_gru import *
+from dnc import *
 
 def generate_copy_batch(batch_size, seq_len, vocab_size, device):
     seqs = torch.randint(0, vocab_size - 1, (seq_len, batch_size), device=device)
@@ -103,12 +103,9 @@ def train_copy_task_until_converged(model, device, max_iters=50000, seq_len_star
                 ).item()
 
                 eval_acc = evaluate_copy_accuracy(pred_eval, target_eval)
-                stats = model.get_memory_usage_stats()
 
                 print(f"\n[EVAL Iter {it}] Eval Loss={eval_loss:.4f}, Eval Acc={eval_acc*100:.2f}% (len={eval_seq_len})")
-                print(f"Read entropy = {stats['read_entropy']:.2f}")
-                print(f"Write entropy = {stats['write_entropy']:.2f}")
-                print(f"Memory Sparsity {stats['memory_sparsity']:.2f}")
+                model.print_memory_stats()
                 # Show example (first in batch)
                 pred_tokens = torch.argmax(pred_eval[:, 0, :], dim=-1).cpu().tolist()
                 target_tokens = target_eval[:, 0].cpu().tolist()
@@ -213,18 +210,17 @@ if __name__ == "__main__":
     torch.set_default_device(device)
     print(f"Using device: {device}")
 
-    print("NTM BATCHED COPY TASK TRAINING")
+    print("DNC COPY TASK TRAINING")
 
     memory_length = 128
-    model = NTM(
+    model = DNC(
         input_size=vocab_size,
         memory_length=memory_length,
-        controller_depth=1,
-        controller_width=100,
+        controller_depth=2,
+        controller_width=200,
         read_heads=1,
-        write_heads=1,
-        device = device
-    ).to(device)
+        write_heads=1
+    )
 
     model_controller = "GRU"
 
@@ -243,7 +239,7 @@ if __name__ == "__main__":
         model,
         device=device,
         max_iters=50000,
-        seq_len_start=2,
+        seq_len_start=1,
         seq_len_max=20,
         batch_size=32,
         lr=1e-3,

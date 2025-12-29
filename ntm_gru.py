@@ -36,10 +36,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 import string
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any
 
 class NTM(nn.Module):
-    def __init__(self, vocab_size, memory_length, controller_depth=1, controller_width=100, read_heads=1, write_heads=1, device='cpu'):
+    def __init__(self, input_size, memory_length,
+        controller_depth=1, controller_width=100,
+        read_heads=1, write_heads=1, device='cpu'):
         super().__init__()
 
         self.device = device
@@ -47,7 +49,12 @@ class NTM(nn.Module):
         self.RH = read_heads
         self.WH = write_heads
         self.N = memory_length
-        self.M = vocab_size
+        self.M = input_size
+
+        #self.embedding = nn.Sequential(nn.Linear(self.M, self.M), nn.LayerNorm(self.M), nn.CELU())
+        #self.embedding = nn.Sequential(nn.Linear(self.M, self.M), nn.CELU())
+        #self.embedding = nn.Sequential(nn.Linear(input_size, self.M))
+        self.embedding = nn.Identity()
 
         # Read/write parameter sizes
         self.read_lengths = [self.M, 1, 1, 3, 1]
@@ -56,14 +63,16 @@ class NTM(nn.Module):
         self.write_lengths = [self.M, 1, 1, 3, 1, self.M, self.M]
         self.write_length = sum(self.write_lengths)
 
-        #self.controller_input = self.M + self.M * self.RH
-        #We are trying to process the inputs as sequences for now
-        self.controller_input = self.M
-        self.controller_output_size = self.read_length * self.RH + self.write_length * self.WH + self.M
         self.controller_width = controller_width
         self.controller_depth = controller_depth
-        self.controller = nn.GRU(self.controller_input, self.controller_width, self.controller_depth, batch_first=False, dropout = 0.0)
-        self.controller_projection = nn.Linear(self.controller_width, self.controller_output_size)
+        self.controller_input = self.M# + self.M * self.RH
+        #self.controller_output_size = (self.read_length * self.RH) + (self.write_length * self.WH) + self.M
+
+        self.controller = nn.GRU(self.controller_input, self.controller_width, self.controller_depth, batch_first=False)
+        self.read_head = nn.Sequential(nn.Linear(self.controller_width, self.read_length*self.RH))
+        self.write_head = nn.Sequential(nn.Linear(self.controller_width, self.write_length * self.WH))
+        self.read_matrix = nn.Linear(self.RH*self.M, self.M, bias=False)
+        self.out_head = nn.Linear(self.controller_width, self.M)
 
         # Initialize memory buffer (not model parameters)
         self.register_buffer('memory_initial', torch.zeros(self.N, self.M))
@@ -77,41 +86,19 @@ class NTM(nn.Module):
         # Weights: [batch, num_heads, N]
         init_w = torch.zeros(batch_size, self.N, device=self.device)
         init_w[:, 0] = 1.0  # Start focused on first memory location
+        #init_w = torch.full((batch_size, self.N), 1.0 / self.N, device=self.device)  # Uniform soft attention
         self.read_w = init_w.unsqueeze(1).repeat(1, self.RH, 1)  # [batch, RH, N]
         self.write_w = init_w.unsqueeze(1).repeat(1, self.WH, 1)  # [batch, WH, N]
 
         self.hidden = torch.zeros(self.controller_depth, batch_size, self.controller_width, device=self.device)
 
     def forward(self, x):
-        """
-        x: [batch, M] input vectors (one-hot or embeddings)
-        Returns: [batch, M] output logits
-        """
-        batch = x.size(0)
+        xe = self.embedding(x)
+        o, self.hidden = self.controller(xe.unsqueeze(0), self.hidden)
+        o = o[-1,:,:]
 
-        read_vecs = []
-        for h in range(self.RH):
-            w = self.read_w[:, h, :].unsqueeze(1) # [batch, 1, N]
-            read_vector = torch.bmm(w, self.memory).squeeze(1) # [batch, M]
-            read_vecs.append(read_vector)
-
-        # Concatenate input with all read heads: [batch, M + RH*M]
-        #reads_flat = read_vecs.reshape(batch, -1)  # [batch, RH*M]
-        #controller_input = torch.cat([x, reads_flat], dim=-1)
-
-        read_vecs = torch.stack(read_vecs, dim=0)  # [RH, batch, M]
-        controller_input = torch.cat((x.unsqueeze(0), read_vecs), dim = 0)
-        controller_input = controller_input  # [1 + RH, batch, controller_input]
-
-        # Controller forward
-        output, self.hidden = self.controller(controller_input, self.hidden)
-        controller_out = self.controller_projection(output[-1,:,:])  # [batch, controller_output_size]
-
-        # Split controller output
-        rh_params = controller_out[:, :self.read_length * self.RH]
-        wh_params = controller_out[:, self.read_length * self.RH:self.read_length * self.RH + self.write_length * self.WH]
-        y = controller_out[:, self.read_length * self.RH + self.write_length * self.WH:]
-
+        #Execute Read
+        rh_params = self.read_head(o)
         new_read_weights = []
         for h in range(self.RH):
             params = rh_params[:, h * self.read_length:(h + 1) * self.read_length]
@@ -128,6 +115,15 @@ class NTM(nn.Module):
             new_read_weights.append(wt)
         self.read_w = torch.stack(new_read_weights, dim=1) # [batch, RH, N]
 
+        read_vecs = []
+        for h in range(self.RH):
+            w = self.read_w[:, h, :].unsqueeze(1) # [batch, 1, N]
+            read_vector = torch.bmm(w, self.memory).squeeze(1) # [batch, M]
+            read_vecs.append(read_vector)
+        read_vecs = torch.cat(read_vecs, dim = 1)
+        y = self.out_head(o) + self.read_matrix(read_vecs)
+
+        wh_params = self.write_head(o)
         new_memory = self.memory
         new_write_weights = []
         for h in range(self.WH):
@@ -148,7 +144,8 @@ class NTM(nn.Module):
 
             # Erase and add (batched outer products)
             erase_v = torch.sigmoid(erase)  # [batch, M]
-            add_v = add  # [batch, M]
+            add_v = torch.tanh(add) # add  # [batch, M]
+            #add_v = add
 
             # [batch, N, M] operations - create new tensors instead of modifying in place
             erase_matrix = wt.unsqueeze(-1) * erase_v.unsqueeze(1)  # [batch, N, M]

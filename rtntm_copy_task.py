@@ -297,9 +297,7 @@ def train_copy_task_until_converged(
             else:
                 # Increase sequence length
                 current_seq_len = min(current_seq_len + 2, seq_len_max)
-                print(f"\n{'='*70}")
                 print(f">>> CURRICULUM: Increasing seq_len to {current_seq_len}")
-                print(f"{'='*70}\n")
 
     # Final save
     final_path = os.path.join(model_dir, "rtntm_copy_final.pt")
@@ -343,11 +341,11 @@ if __name__ == "__main__":
 
     # Model configuration
     emb_dim = 200
-    memory_N = 60
+    memory_N = 128
     n_heads = 4
     n_layers = 1
-    controller_window = 4
-    read_heads = 1
+    controller_window = 8
+    read_heads = 2
     write_heads = 1
 
     print(f"\nModel Configuration:")
@@ -391,7 +389,7 @@ if __name__ == "__main__":
         eval_every=500,
         save_every=2000,
         acc_threshold=0.99,
-        loss_threshold=0.01,
+        loss_threshold=0.05,
         model_dir="./models_rtntm"
     )
 

@@ -109,8 +109,7 @@ class TransformerController(nn.Module):
     def forward_step(self,
                      input_emb: torch.Tensor, # [batch, D] embedded input
                      input_history,
-                     read_vecs,
-                     record): #record is the internal hidden state layers [batch, D]
+                     read_vecs): #record is the internal hidden state layers [batch, D]
         """
         Forward step recieves:
         0 input vector,
@@ -126,8 +125,7 @@ class TransformerController(nn.Module):
             input_history = input_emb.unsqueeze(0)
 
         input_history = self.pos_encoding(input_history)
-        context = torch.cat((read_vecs, record, input_history), dim=0)
-        #context = self.pos_encoding(context)
+        context = torch.cat((read_vecs, input_history), dim=0)
         context = self.transformer(context)  # [hist_len+RH, batch, D]
 
         current_pos = context.size(0) - 1
@@ -286,17 +284,17 @@ class RTNTM(nn.Module):
 
         # Controller forward: transformer over [input_history + projected_reads]
         controller_out, self.input_history = self.controller.forward_step(
-            input_emb, self.input_history, read_vecs, self.hx)
+            input_emb, self.input_history, read_vecs)#, self.hx)
         # controller_out: [batch, d_model]
 
-        output, self.hx = self.state_update(controller_out.unsqueeze(0), self.hx)
-        output = self.controller_out_norm(controller_out + output.squeeze()) #[batch, D]
+        #output, self.hx = self.state_update(controller_out.unsqueeze(0), self.hx)
+        #output = self.controller_out_norm(controller_out + output.squeeze()) #[batch, D]
 
         # Next token prediction
-        logits = self.token_head(output)  # [batch, vocab_size]
+        logits = self.token_head(controller_out)  # [batch, vocab_size]
 
         # Generate read parameters from controller output
-        read_params = self.read_head(output)  # [batch, RH * read_param_len]
+        read_params = self.read_head(controller_out)  # [batch, RH * read_param_len]
         read_params = read_params.view(batch, self.RH, self.read_param_len)
 
         new_read_w = []
@@ -316,7 +314,7 @@ class RTNTM(nn.Module):
         self.read_w = torch.stack(new_read_w, dim=1)
 
         # Generate write parameters and update memory
-        write_params = self.write_head(output)
+        write_params = self.write_head(controller_out)
         write_params = write_params.view(batch, self.WH, self.write_param_len)
 
         mem = self.memory
