@@ -538,24 +538,153 @@ End time: 2025-12-18 22:05:29.984691
 
 ## RTDNC
 
-Probably hot garbage. DO DNC FIRST THEN RTDNC!
+We have a begining implementation of the RTDNC. We must now try it on harder problems.
+
+### Copy Task
+
+```
+> python rtdnc_copy_task.py
+Start time: 2025-12-29 19:14:07.179565
+Using device: cuda
+RTDNC COPY TASK TRAINING
+
+Model Configuration:
+  Vocab size: 100
+  Embedding dimension: 200
+  Memory: 128 × 200
+  Transformer: 2 layers, 4 heads
+  Controller window: 8
+  Read heads: 1, Write heads: 1
+  Total parameters: 1,214,258
+======================================================================
+...
+======================================================================
+=== TRAINING COMPLETE ===
+Reached acc=99.72% and loss=0.0317
+at max seq_len=50
+======================================================================
+
+>>> Final model saved to: ./models/rtdnc_copy_final.pt
+>>> Best model (acc=6.34%, loss=4.8704) at: ./models/rtdnc_copy_best.pt
+
+======================================================================
+TRAINING FINISHED
+Final model: ./models/rtdnc_copy_final.pt
+Total time: 2.49 minutes (0.04 hours)
+======================================================================
+
+End time: 2025-12-29 19:16:36.852232
+======================================================================
+```
 
 ### Add numbers
 
 ```
 > python rtdnc_add_nums.py
-Start time: 2025-12-20 19:22:19.081879
+Start time: 2025-12-29 19:23:27.563136
+Using device: cuda
 
+Model Configuration:
+  Vocab: 0123456789+= _ (size=14)
+  Embedding dimension: 128
+  Memory: 128 × 128
+  Transformer: 1 layers, 4 heads
+  Controller window: 10 (forces external memory use)
+  Read heads: 2, Write heads: 1
+ Total parameters: 298,848
+======================================================================
+...
+======================================================================
+TARGET REACHED: Perfect performance on num_len=20
+======================================================================
+about 23 mins
+======================================================================
+TRAINING FINISHED
+Final model saved to: ./models/rtdnc_add_littleendian_final.pt
+======================================================================
+
+
+> python rtdnc_add_nums.py
+Start time: 2025-12-29 20:31:46.848737
+Using device: cuda
+
+Model Configuration:
+  Vocab: 0123456789+= _ (size=14)
+  Embedding dimension: 128
+  Memory: 128 × 128
+  Transformer: 2 layers, 4 heads
+  Controller window: 10 (forces external memory use)
+  Read heads: 3, Write heads: 1
+ Total parameters: 516,069
+======================================================================
+...
+======================================================================
+TARGET REACHED: Perfect performance on num_len=20
+======================================================================
+
+======================================================================
+TRAINING FINISHED
+Final model saved to: ./models/rtdnc_add_littleendian_final.pt
+Final model: ./models/rtdnc_add_littleendian_final.pt
+Total time: 12.80 minutes (0.21 hours)
+======================================================================
+
+End time: 2025-12-29 20:44:35.014860
+======================================================================
+
+> python rtdnc_add_nums.py
+Start time: 2025-12-30 00:44:44.170092
 Using device: cuda
 
 Model Configuration:
   Vocab: 0123456789+= _ (size=14)
   Embedding dimension: 64
   Memory: 128 × 64
-  Transformer: 2 layers, 8 heads
-  Controller window: 16 (forces external memory use)
+  Transformer: 2 layers, 4 heads
+  Controller window: 10 (forces external memory use)
+  Read heads: 3, Write heads: 1
+ Total parameters: 133,189
+======================================================================
+...
+======================================================================
+TARGET REACHED: Perfect performance on num_len=20
+======================================================================
+
+======================================================================
+TRAINING FINISHED
+Final model saved to: ./models/rtdnc_add_littleendian_final.pt
+Final model: ./models/rtdnc_add_littleendian_final.pt
+Total time: 23.49 minutes (0.39 hours)
+======================================================================
+
+End time: 2025-12-30 01:08:13.868292
+======================================================================
+
+> python rtdnc_add_nums.py
+Start time: 2025-12-30 16:25:15.465713
+Using device: cuda
+
+Model Configuration:
+  Vocab: 0123456789+= _ (size=14)
+  Embedding dimension: 256
+  Memory: 128 × 256
+  Transformer: 1 layers, 4 heads
+  Controller window: 10 (forces external memory use)
   Read heads: 4, Write heads: 1
-  State layers: 2
- Total parameters: 186,320
+ Total parameters: 1,312,298
+======================================================================
+...
+======================================================================
+TARGET REACHED: Perfect performance on num_len=20
+======================================================================
+
+======================================================================
+TRAINING FINISHED
+Final model saved to: ./models/rtdnc_add_littleendian_final.pt
+Final model: ./models/rtdnc_add_littleendian_final.pt
+Total time: 12.94 minutes (0.22 hours)
+======================================================================
+
+End time: 2025-12-30 16:38:12.243371
 ======================================================================
 ```

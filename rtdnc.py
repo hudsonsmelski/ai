@@ -23,28 +23,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Any, Tuple, Optional
 
-#TODO, hook up with larger kernel size for input sequences
 class CNNEmbedding(nn.Module):
     def __init__(self, vocab_size, emb_dim):
         super().__init__()
         self.vocab_size = vocab_size
 
-        # One-hot to embedding via convolutions
         intermediate = (vocab_size + emb_dim)//2
         self.l1 = nn.Conv1d(vocab_size, intermediate, kernel_size=1)
         self.l2 = nn.Conv1d(intermediate, emb_dim, kernel_size=1)
-        self.bn1 = nn.BatchNorm1d(intermediate)
-        self.bn2 = nn.BatchNorm1d(emb_dim)
+
+        self.ln1 = nn.LayerNorm(intermediate)
+        self.ln2 = nn.LayerNorm(emb_dim)
 
     def forward(self, x_t):
-        # x_t: [batch] token indices
-        # Convert to one-hot
-        one_hot = F.one_hot(x_t, num_classes=self.vocab_size).float()  # [batch, vocab]
+        one_hot = F.one_hot(x_t, num_classes=self.vocab_size).float()
         one_hot = one_hot.unsqueeze(-1)  # [batch, vocab, 1]
 
-        x = F.gelu(self.bn1(self.l1(one_hot)))
-        x = F.gelu(self.bn2(self.l2(x)))
-        return x.squeeze(-1)  # [batch, emb_dim]
+        x = self.l1(one_hot)  # [batch, intermediate, 1]
+        x = x.squeeze(-1)  # [batch, intermediate]
+        x = F.gelu(self.ln1(x))
+        x = x.unsqueeze(-1)  # [batch, intermediate, 1]
+
+        x = self.l2(x)  # [batch, emb_dim, 1]
+        x = x.squeeze(-1)  # [batch, emb_dim]
+        x = F.gelu(self.ln2(x))
+
+        return x
 
 class PositionalEncoding(nn.Module):
     """
@@ -57,15 +61,9 @@ class PositionalEncoding(nn.Module):
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe[:, 0, 0::2] = torch.sin(position * div_term)
         pe[:, 0, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)  # Not a parameter, persists in state_dict
+        self.register_buffer('pe', pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Tensor of shape [seq_len, batch, d_model]
-        Returns:
-            x + positional encoding
-        """
         seq_len = x.size(0)
         return x + self.pe[:seq_len]
 
@@ -108,13 +106,9 @@ class TransformerController(nn.Module):
     def forward_step(self,
                      input_emb: torch.Tensor, # [batch, D] embedded input
                      input_history,
-                     read_vecs,
-                     record): #record is the internal hidden state layers [batch, D]
+                     read_vecs):
         """
-        Forward step recieves:
-        0 input vector,
-        1 previous state vector(s),
-        2 memory vector(s)
+        Forward step recieves: input vector, memory vector(s)
         """
         #inputs includes read vectors which we won't store
         if input_history is not None:
@@ -124,19 +118,18 @@ class TransformerController(nn.Module):
         else:
             input_history = input_emb.unsqueeze(0)
 
-        input_history = self.pos_encoding(input_history)
-        context = torch.cat((read_vecs, record, input_history), dim=0)
-        #context = self.pos_encoding(context)
-        context = self.transformer(context)  # [hist_len+RH, batch, D]
+        input_history_ = self.pos_encoding(input_history)
+        context = torch.cat((read_vecs, input_history_), dim=0)
+        context = self.transformer(context)  # [hist_len + RH + state_layers, batch, D]
 
         current_pos = context.size(0) - 1
         controller_out = context[current_pos]  # [batch, D]
         controller_out = self.output_norm(controller_out)
         return controller_out, input_history
 
-class RTNTM(nn.Module):
+class RTDNC(nn.Module):
     def __init__(self,
-                 vocab_size: int,
+                 input_size: int,
                  emb_dim: int,
                  memory_N: int,
                  n_heads: int = 4,
@@ -144,39 +137,24 @@ class RTNTM(nn.Module):
                  controller_window: int = 16,
                  read_heads: int = 1,
                  write_heads: int = 1,
-                 shift_width: int = 3,
-                 state_layers: int = 1,
                  dropout: float = 0.1):
-        """
-        RTNTM
-        Experimenting: embedding dimension (D) = memory vector length (M)
-        We are storing the embedding dimension vectors in memory
-        We are using a recurrent layer(s) after the transformer, such that the transformer is self aware.
-        The Transformer will act as the context arbiter for the recurrent layer(s) to focus.
-
-        Context = Immediate mental context            (Context Length x D)
-        Cx      = Short term memory from LSTM layers  (# State Layers x D)
-        NxD     = Long term memory storage            (N# Mem vectors x D)
-        """
         super().__init__()
 
-        assert shift_width % 2 == 1, "shift_width must be odd"
-
-        self.vocab_size = vocab_size
+        self.input_size = input_size
         self.D = emb_dim
         self.N = memory_N
-        self.M = emb_dim #memory_M
+        self.M = emb_dim
         self.RH = read_heads
         self.WH = write_heads
-        self.shift_K = shift_width
-        self.half_shift = shift_width // 2
         self.window = controller_window
-        self.usage_decay = 0.99
 
-        # Input embedding
-        self.embedding = CNNEmbedding(vocab_size, emb_dim)
+        #For expanded ability and reduced error
+        self.head_dim = self.D
+        self.read_param_len = self.M + 1 + 3
+        self.write_param_len = self.M + 1 + self.M + self.M + self.RH + 1 + 1
 
-        # Transformer controller
+
+        self.embedding = CNNEmbedding(self.input_size, self.D)
         self.controller = TransformerController(
             d_model=self.D,
             n_heads=n_heads,
@@ -184,340 +162,70 @@ class RTNTM(nn.Module):
             window_size=self.window,
             dropout=dropout
         )
-
-        #For expanded ability and reduced error
-        self.head_dim = self.D
-        self.state_layers = state_layers
-        self.state_update = nn.GRU(self.D, self.head_dim, self.state_layers)
-        self.controller_out_norm = nn.LayerNorm(self.D)
-
-        # Output head for next token prediction
-        self.token_head = nn.Linear(self.D, vocab_size)
-
-        # Read head: projects controller output to NTM read parameters
-        #self.read_param_len = self.M + 1 + 1 + self.shift_K + 1
-        self.read_param_len = self.M + 1 + 1 + self.shift_K + 1 + 1 + 1 + 1
         self.read_head = nn.Linear(self.D, self.RH * self.read_param_len)
-
-        # Write head: projects controller output to NTM write parameters
-        #self.write_param_len = self.M + 1 + 1 + self.shift_K + 1 + self.M + self.M
-        self.write_param_len = self.M + 1 + 1 + self.shift_K + 1 + self.M + self.M + 1
         self.write_head = nn.Linear(self.D, self.WH * self.write_param_len)
+        self.read_matrix = nn.Linear(self.RH*self.M, self.input_size)
+        self.out = nn.Linear(self.D, self.input_size)
 
-        # Initialize memory to zeros
         self.register_buffer('memory_initial', torch.zeros(self.N, self.M))
+        self.reset()
 
-    def init_state(self, batch_size: int = 1, device=None):
-        """Initialize clean state"""
-        if device is None:
-            device = next(self.parameters()).device
-
-        # Memory: [batch, N, M]
+    def reset(self, batch_size: int = 1):
+        self.batch_size = batch_size
         self.memory = self.memory_initial.unsqueeze(0).repeat(batch_size, 1, 1).clone()
-        self.link_matrix = torch.zeros(batch_size, self.N, self.N, device=device)
-        self.precedence = torch.zeros(batch_size, self.N, device=device)
-        self.usage = torch.zeros(batch_size, self.N, device=device)
+        self.link_matrix = torch.zeros(batch_size, self.N, self.N)
+        self.precedence = torch.zeros(batch_size, self.N)
+        self.usage = torch.zeros(batch_size, self.N)
 
-        # Read/write weights: [batch, RH/WH, N]
-        read_w = torch.zeros(batch_size, self.RH, self.N, device=device)
-        read_w[:, :, 0] = 1.0
-        self.read_w = read_w
+        init_w = torch.zeros(batch_size, self.N)
+        init_w[:, 0] = 1.0
+        self.read_w = init_w.unsqueeze(1).repeat(1, self.RH, 1)
+        self.write_w = init_w.unsqueeze(1).repeat(1, self.WH, 1)
 
-        write_w = torch.zeros(batch_size, self.WH, self.N, device=device)
-        write_w[:, :, 0] = 1.0
-        self.write_w = write_w
-
-        self.hx = torch.zeros(self.state_layers, batch_size, self.D, device=device)
         self.input_history = None
-
-    def addressing(self, key, beta, gate, shift, gamma, prev_w, memory) -> torch.Tensor:
-        """NTM addressing mechanism"""
-        eps = 1e-12
-
-        # Content addressing
-        key_norm = key / (key.norm(dim=-1, keepdim=True) + eps)
-        mem_norm = memory / (memory.norm(dim=-1, keepdim=True) + eps)
-        cos_sim = torch.bmm(mem_norm, key_norm.unsqueeze(-1)).squeeze(-1)
-
-        beta_pos = F.softplus(beta).squeeze(-1)
-        wc = F.softmax(beta_pos.unsqueeze(-1) * cos_sim, dim=-1)
-
-        # Interpolation
-        g = torch.sigmoid(gate).squeeze(-1)
-        wg = g.unsqueeze(-1) * wc + (1.0 - g).unsqueeze(-1) * prev_w
-
-        # Convolutional shift
-        s = F.softmax(shift, dim=-1)
-        shifted = torch.zeros_like(wg)
-        for k in range(self.shift_K):
-            shift_amount = k - self.half_shift
-            rolled = torch.roll(wg, shifts=shift_amount, dims=-1)
-            shifted = shifted + s[:, k].unsqueeze(-1) * rolled
-
-        # Sharpening
-        gamma_p = 1.0 + F.softplus(gamma).squeeze(-1)
-        wt = (shifted + eps) ** gamma_p.unsqueeze(-1)
-        wt = wt / (wt.sum(dim=-1, keepdim=True) + eps)
-
-        return wt
-
-    def allocate_memory(self, usage, write_gate):
-        """
-        Find free memory locations based on usage.
-
-        Args:
-            usage: [batch, N] - how much each slot has been used
-            write_gate: [batch, 1] - scalar gating allocation vs content addressing
-
-        Returns:
-            allocation_weights: [batch, N] - where to allocate new writes
-        """
-        # Sort by usage (ascending - least used first)
-        sorted_usage, free_list = torch.sort(usage, dim=-1, descending=False)
-
-        # Allocation weight is higher for less-used locations
-        # Use cumulative product to ensure we fill sequentially
-        shifted_usage = torch.cat([
-            torch.zeros_like(usage[:, :1]),
-            sorted_usage[:, :-1]
-        ], dim=-1)
-
-        allocation_weights = (1 - sorted_usage) * torch.cumprod(shifted_usage, dim=-1)
-
-        # Scatter back to original indices
-        batch_size = usage.shape[0]
-        allocation_result = torch.zeros_like(usage)
-        for b in range(batch_size):
-            allocation_result[b].scatter_(0, free_list[b], allocation_weights[b])
-
-        return allocation_result
-
-    def temporal_link_addressing(self, link_matrix, read_w, forward=True):
-        """
-        Follow temporal links from current read position.
-
-        Args:
-            link_matrix: [batch, N, N] - L[i,j] = strength of link from i to j
-            read_w: [batch, N] - current read weights
-            forward: if True, read forward links; if False, read backward
-
-        Returns:
-            linked_weights: [batch, N] - weights after following links
-        """
-        if forward:
-            # Forward: which locations were written AFTER current position
-            # link_matrix[i,j] means j was written after i
-            linked = torch.bmm(read_w.unsqueeze(1), link_matrix).squeeze(1)
-        else:
-            # Backward: which locations were written BEFORE current position
-            # Transpose to get link_matrix[j,i] = i was written before j
-            linked = torch.bmm(read_w.unsqueeze(1), link_matrix.transpose(1, 2)).squeeze(1)
-
-        return linked
-
-    def update_temporal_links(self, write_w, prev_precedence):
-        """
-        Update temporal link matrix based on write order.
-
-        Args:
-            write_w: [batch, N] - current write weights
-            prev_precedence: [batch, N] - previous precedence weights
-
-        Returns:
-            new_link_matrix: [batch, N, N]
-            new_precedence: [batch, N]
-        """
-        # Decay old links where we're writing
-        # If we write to location i, all links i->j should be reset
-        link_matrix = (1 - write_w.unsqueeze(-1)) * self.link_matrix
-
-        # Add new links: current write comes after all previous writes
-        # link_matrix[i,j] += prev_precedence[i] * write_w[j]
-        # Meaning: if i had precedence before, and we're writing to j now,
-        # then j comes after i
-        link_matrix = link_matrix + torch.bmm(
-            prev_precedence.unsqueeze(-1),
-            write_w.unsqueeze(1)
-        )
-
-        # Ensure no self-links and symmetry constraints
-        eye = torch.eye(self.N, device=link_matrix.device).unsqueeze(0)
-        link_matrix = link_matrix * (1 - eye)
-
-        # Update precedence: current write becomes new precedence
-        # Decay old precedence where we're writing
-        new_precedence = (1 - write_w.sum(dim=0, keepdim=True)) * prev_precedence + write_w
-
-        return link_matrix, new_precedence
-
-    def update_usage(self, write_w, read_w):
-        """
-        Update memory usage based on reads and writes.
-
-        Args:
-            write_w: [batch, WH, N] or [batch, N] - write weights
-            read_w: [batch, RH, N] or [batch, N] - read weights
-
-        Returns:
-            new_usage: [batch, N]
-        """
-        # Decay existing usage
-        usage = self.usage_decay * self.usage
-
-        # Flatten head dimensions if present
-        if write_w.dim() == 3:
-            write_contribution = write_w.sum(dim=1)  # Sum over write heads
-        else:
-            write_contribution = write_w
-
-        if read_w.dim() == 3:
-            read_contribution = read_w.sum(dim=1)  # Sum over read heads
-        else:
-            read_contribution = read_w
-
-        # Writing and reading both increase usage
-        usage = usage + write_contribution + read_contribution
-
-        # Clip to [0, 1]
-        return torch.clamp(usage, 0, 1)
+        self.read_vecs = torch.zeros(self.RH, self.batch_size, self.M)
 
     def step(self, x_t: torch.Tensor) -> torch.Tensor:
-        """
-         x_t: [batch] token indices
-        """
-        batch = x_t.shape[0]
+        xe = self.embedding(x_t)  # [batch, d_model]
 
-        input_emb = self.embedding(x_t)  # [batch, d_model]
+        o, self.input_history = self.controller.forward_step(
+            xe, self.input_history, self.read_vecs) # controller_out: [batch, d_model]
+
+        prev_read_w = self.read_w
+        rh_params = self.read_head(o)
+        new_read_w = []
+        for h in range(self.RH):
+            params = rh_params[:, h * self.read_param_len:(h + 1) * self.read_param_len]
+            wt = self.addressing(params, self.read_w[:, h, :], self.memory, self.link_matrix, mode='read')
+            new_read_w.append(wt)
+        self.read_w = torch.stack(new_read_w, dim=1)  # [batch, RH, N]
 
         read_vecs = []
         for h in range(self.RH):
             w = self.read_w[:, h, :].unsqueeze(1)  # [batch, 1, N]
             r = torch.bmm(w, self.memory).squeeze(1)  # [batch, M]
             read_vecs.append(r)
-        read_vecs = torch.stack(read_vecs, dim = 0) # [RH, batch, M]
+        self.read_vecs = torch.stack(read_vecs, dim = 0) # [RH, batch, M]
 
-        controller_out, self.input_history = self.controller.forward_step(
-            input_emb, self.input_history, read_vecs, self.hx) # controller_out: [batch, d_model]
+        wh_params = self.write_head(o)
+        new_memory, write_w, new_usage, new_link_matrix, new_precedence = \
+            self.write_head_logic(wh_params, self.memory, self.usage,
+                                 self.link_matrix, self.precedence, prev_read_w)
 
-        output, self.hx = self.state_update(controller_out.unsqueeze(0), self.hx)
-        output = self.controller_out_norm(controller_out + output.squeeze()) #[batch, D]
+        self.memory = new_memory#.detach()
+        self.usage = new_usage#.detach()
+        self.link_matrix = new_link_matrix#.detach()
+        self.precedence = new_precedence#.detach()
+        self.write_w = write_w.unsqueeze(1)#.detach()
 
-        # Next token prediction
-        logits = self.token_head(output)  # [batch, vocab_size]
+        y = self.out(o)  # [batch, vocab_size]
+        return y
 
-        # Generate read parameters from controller output
-        read_params = self.read_head(output)  # [batch, RH * read_param_len]
-        read_params = read_params.view(batch, self.RH, self.read_param_len)
-
-        new_read_w = []
-        for h in range(self.RH):
-            rp = read_params[:, h, :]
-            idx = 0
-            key = rp[:, idx:idx + self.M]; idx += self.M
-            beta = rp[:, idx:idx + 1]; idx += 1
-            gate = rp[:, idx:idx + 1]; idx += 1
-            shift = rp[:, idx:idx + self.shift_K]; idx += self.shift_K
-            gamma = rp[:, idx:idx + 1]; idx += 1
-            alloc_gate = rp[:, idx:idx + 1]; idx += 1  # NEW
-            forward_strength = rp[:, idx:idx + 1]; idx += 1  # NEW
-            backward_strength = rp[:, idx:idx + 1]; idx += 1  # NEW
-
-            prev_w = self.read_w[:, h, :]
-
-            # Content-based addressing
-            wt_content = self.addressing(key, beta, gate, shift, gamma, prev_w, self.memory)
-
-            # Temporal link addressing
-            forward_w = self.temporal_link_addressing(self.link_matrix, prev_w, forward=True)
-            backward_w = self.temporal_link_addressing(self.link_matrix, prev_w, forward=False)
-
-            # Combine all three addressing modes
-            f_strength = torch.sigmoid(forward_strength).squeeze(-1)
-            b_strength = torch.sigmoid(backward_strength).squeeze(-1)
-            content_strength = 1 - f_strength - b_strength
-
-            wt = (content_strength.unsqueeze(-1) * wt_content +
-                  f_strength.unsqueeze(-1) * forward_w +
-                  b_strength.unsqueeze(-1) * backward_w)
-
-            # Normalize
-            wt = wt / (wt.sum(dim=-1, keepdim=True) + 1e-12)
-
-            new_read_w.append(wt)
-
-        self.read_w = torch.stack(new_read_w, dim=1)
-
-        # Generate write parameters and update memory
-        write_params = self.write_head(output)
-        write_params = write_params.view(batch, self.WH, self.write_param_len)
-
-        mem = self.memory
-        new_write_w = []
-        for h in range(self.WH):
-            wp = write_params[:, h, :]
-            idx = 0
-            key = wp[:, idx:idx + self.M]; idx += self.M
-            beta = wp[:, idx:idx + 1]; idx += 1
-            gate = wp[:, idx:idx + 1]; idx += 1
-            shift = wp[:, idx:idx + self.shift_K]; idx += self.shift_K
-            gamma = wp[:, idx:idx + 1]; idx += 1
-            erase = wp[:, idx:idx + self.M]; idx += self.M
-            add = wp[:, idx:idx + self.M]; idx += self.M
-            alloc_gate = wp[:, idx:idx + 1]; idx += 1  # NEW
-
-            prev_w = self.write_w[:, h, :]
-
-            # Content-based write location
-            wt_content = self.addressing(key, beta, gate, shift, gamma, prev_w, mem)
-
-            # Allocation-based write location
-            wt_alloc = self.allocate_memory(self.usage, alloc_gate)
-
-            # Blend content and allocation addressing
-            a_gate = torch.sigmoid(alloc_gate).squeeze(-1)
-            wt = a_gate.unsqueeze(-1) * wt_alloc + (1 - a_gate.unsqueeze(-1)) * wt_content
-
-            new_write_w.append(wt)
-
-            # Erase and add
-            erase_v = torch.sigmoid(erase)
-            add_v = torch.tanh(add)
-
-            erase_matrix = wt.unsqueeze(-1) * erase_v.unsqueeze(1)
-            mem = mem * (1.0 - erase_matrix)
-
-            add_matrix = wt.unsqueeze(-1) * add_v.unsqueeze(1)
-            mem = mem + add_matrix
-
-        self.memory = mem
-        self.write_w = torch.stack(new_write_w, dim=1)
-
-        write_w_combined = self.write_w.mean(dim=1)  # [batch, N]
-        self.link_matrix, self.precedence = self.update_temporal_links(
-            write_w_combined, self.precedence
-        )
-        self.usage = self.update_usage(self.write_w, self.read_w)
-
-        return logits
-
-    def forward(self,
-                token_seq: torch.Tensor,
-                return_all_logits: bool = False):
-        """
-        Process full sequence.
-
-        Args:
-            token_seq: [seq_len, batch] token indices
-            return_all_logits: if True, return logits for all timesteps
-
-        Returns:
-            logits: [seq_len, batch, vocab_size] or [batch, vocab_size]
-            state: final state
-        """
+    def forward(self, token_seq: torch.Tensor, return_all_logits: bool = False):
         seq_len, batch = token_seq.shape
         device = token_seq.device
 
-        self.init_state(batch_size=batch, device=device)
+        self.reset(batch_size=batch)
 
         logits_all = []
         for t in range(seq_len):
@@ -531,35 +239,224 @@ class RTNTM(nn.Module):
         else:
             return logits
 
-    def get_memory_usage_stats(self) -> Dict[str, Any]:
-        """Diagnostic statistics"""
+    def addressing(self, params, prev_w, memory, link_matrix, mode='read'):
+        eps = 1e-12
+        batch_size = memory.shape[0]
+
+        # Parse parameters
+        idx = 0
+        key = params[:, idx:idx + self.M]; idx += self.M
+        beta = params[:, idx:idx + 1]; idx += 1
+
+        # Content-based addressing
+        key_norm = key / (key.norm(dim=-1, keepdim=True) + eps)
+        mem_norm = memory / (memory.norm(dim=-1, keepdim=True) + eps)
+        cos_sim = torch.bmm(mem_norm, key_norm.unsqueeze(-1)).squeeze(-1)
+
+        beta_pos = F.softplus(beta).squeeze(-1) + 1  # Ensure β ∈ [1, ∞)
+        content_w = F.softmax(beta_pos.unsqueeze(-1) * cos_sim, dim=-1)
+
+        if mode == 'write':
+            # Write only uses content addressing
+            return content_w
+
+        elif mode == 'read':
+            # Read modes: [backward, content, forward]
+            read_modes = params[:, idx:idx + 3]; idx += 3
+            modes = F.softmax(read_modes, dim=-1)  # [batch, 3]
+
+            # Temporal link addressing
+            # Forward: L @ prev_w
+            forward_w = torch.bmm(link_matrix, prev_w.unsqueeze(-1)).squeeze(-1)
+            # Backward: L^T @ prev_w
+            backward_w = torch.bmm(link_matrix.transpose(1, 2), prev_w.unsqueeze(-1)).squeeze(-1)
+
+            # Blend according to read modes: π[0]*backward + π[1]*content + π[2]*forward
+            final_w = (modes[:, 0:1] * backward_w +
+                       modes[:, 1:2] * content_w +
+                       modes[:, 2:3] * forward_w)
+
+            # Normalize (should already sum to ~1, but ensure numerical stability)
+            final_w = final_w / (final_w.sum(dim=-1, keepdim=True) + eps)
+
+            return final_w
+
+    def write_head_logic(self, params, memory, usage, link_matrix, precedence, read_w_all):
+        """
+        Complete DNC write head logic including allocation, interpolation, and memory update.
+
+        Args:
+            params: [batch, write_param_len] - all write parameters
+            memory: [batch, N, M] - memory matrix
+            usage: [batch, N] - usage vector
+            link_matrix: [batch, N, N] - temporal link matrix
+            precedence: [batch, N] - precedence weighting
+            read_w_all: [batch, RH, N] - all read head weightings
+
+        Returns:
+            new_memory: [batch, N, M] - updated memory
+            write_w: [batch, N] - write weighting
+            new_usage: [batch, N] - updated usage
+            new_link_matrix: [batch, N, N] - updated link matrix
+            new_precedence: [batch, N] - updated precedence
+        """
+        eps = 1e-12
+        batch_size = memory.shape[0]
+
+        # Parse parameters
+        idx = 0
+        key = params[:, idx:idx + self.M]; idx += self.M
+        beta = params[:, idx:idx + 1]; idx += 1
+        erase = params[:, idx:idx + self.M]; idx += self.M
+        write = params[:, idx:idx + self.M]; idx += self.M
+        free_gates = params[:, idx:idx + self.RH]; idx += self.RH
+        alloc_gate = params[:, idx:idx + 1]; idx += 1
+        write_gate = params[:, idx:idx + 1]; idx += 1
+
+        # Apply activations
+        erase = torch.sigmoid(erase)  # [batch, M] ∈ [0,1]
+        write = write  # [batch, M] - no activation, can be any value
+        free_gates = torch.sigmoid(free_gates)  # [batch, RH] ∈ [0,1]
+        g_a = torch.sigmoid(alloc_gate).squeeze(-1)  # [batch] ∈ [0,1]
+        g_w = torch.sigmoid(write_gate).squeeze(-1)  # [batch] ∈ [0,1]
+
+        # 1. Content-based addressing for write
+        content_w = self.addressing(params[:, :self.M + 1], torch.zeros(batch_size, self.N, device=memory.device), memory, None, mode='write')
+
+        # 2. Calculate retention vector ψ (psi)
+        # ψ = ∏(1 - f_i * w_r,i) over all read heads
+        retention = torch.ones(batch_size, self.N, device=memory.device)
+        for i in range(self.RH):
+            retention = retention * (1 - free_gates[:, i:i+1] * read_w_all[:, i, :])
+
+        # 3. Update usage
+        # u_t = (u_{t-1} + w_w - u_{t-1} ⊙ w_w) ⊙ ψ_t
+        # Note: We use previous write_w here (from last timestep stored in self.write_w)
+        prev_write_w = self.write_w[:, 0, :]  # Assuming single write head for now
+        new_usage = (usage + prev_write_w - usage * prev_write_w) * retention
+        new_usage = torch.clamp(new_usage, min=0)
+
+        # 4. Allocation weighting
+        # Sort by usage (ascending - least used first)
+        sorted_usage, free_list = torch.sort(new_usage, dim=-1, descending=False)
+
+        # Calculate allocation weights using equation (1) from paper
+        # a_t[φ_t[j]] = (1 - u_t[φ_t[j]]) * ∏_{i=1}^{j-1} u_t[φ_t[i]]
+        cumprod = torch.cumprod(sorted_usage + eps, dim=-1)
+        cumprod = torch.cat([torch.ones(batch_size, 1, device=memory.device), cumprod[:, :-1]], dim=-1)
+        allocation_w_sorted = (1 - sorted_usage) * cumprod
+        allocation_w = torch.zeros_like(new_usage).scatter_(1, free_list, allocation_w_sorted)
+
+        # 5. Interpolate allocation and content weightings
+        # w_w = g_w * (g_a * a + (1 - g_a) * c_w)
+        write_w = g_w.unsqueeze(-1) * (g_a.unsqueeze(-1) * allocation_w +
+                                        (1 - g_a.unsqueeze(-1)) * content_w)
+
+        # 6. Update temporal link matrix and precedence
+        # L_t[i,j] = (1 - w_w[i] - w_w[j]) * L_{t-1}[i,j] + w_w[i] * p_{t-1}[j]
+        # Exclude self-links (diagonal = 0)
+        new_link_matrix = (1 - write_w.unsqueeze(1) - write_w.unsqueeze(2)) * link_matrix
+        new_link_matrix = new_link_matrix + torch.bmm(
+            write_w.unsqueeze(2),  # [batch, N, 1]
+            precedence.unsqueeze(1)  # [batch, 1, N]
+        )
+
+        # Zero out diagonal
+        eye = torch.eye(self.N, device=link_matrix.device).unsqueeze(0)
+        new_link_matrix = new_link_matrix * (1 - eye)
+
+        # p_t = (1 - sum(w_w)) * p_{t-1} + w_w
+        new_precedence = (1 - write_w.sum(dim=-1, keepdim=True)) * precedence + write_w
+
+        # 7. Erase and write to memory
+        # M_t[i,j] = M_{t-1}[i,j] * (1 - w_w[i] * e[j]) + w_w[i] * v[j]
+        erase_term = 1 - torch.bmm(write_w.unsqueeze(2), erase.unsqueeze(1))  # [batch, N, M]
+        new_memory = memory * erase_term
+
+        write_term = torch.bmm(write_w.unsqueeze(2), write.unsqueeze(1))  # [batch, N, M]
+        new_memory = new_memory + write_term
+
+        return new_memory, write_w, new_usage, new_link_matrix, new_precedence
+
+    def num_params(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def get_memory_usage_stats(self):
+        """Diagnostic statistics for DNC memory and addressing"""
         stats = {}
+        eps = 1e-12
 
         stats['input_history_len'] = self.input_history.size(0)
         stats['input_history_max'] = self.window
         stats['history_utilization'] = stats['input_history_len'] / self.window
 
+        # Memory content statistics
         stats['memory_mean'] = self.memory.mean().item()
         stats['memory_std'] = self.memory.std().item()
         stats['memory_abs_max'] = self.memory.abs().max().item()
         stats['memory_sparsity'] = (self.memory.abs() < 0.01).float().mean().item()
 
-        eps = 1e-12
+        # Memory usage vector (key DNC diagnostic)
+        stats['usage_mean'] = self.usage.mean().item()
+        stats['usage_std'] = self.usage.std().item()
+        stats['usage_max'] = self.usage.max().item()
+        stats['usage_min'] = self.usage.min().item()
+        stats['num_slots_used'] = (self.usage > 0.5).sum().item() / self.batch_size
+        stats['num_slots_free'] = (self.usage < 0.1).sum().item() / self.batch_size
+
+        # Read head statistics
         read_entropy = -(self.read_w * (self.read_w + eps).log()).sum(-1).mean().item()
-        write_entropy = -(self.write_w * (self.write_w + eps).log()).sum(-1).mean().item()
-
         stats['read_entropy'] = read_entropy
-        stats['write_entropy'] = write_entropy
         stats['read_sharpness'] = math.log(self.N) - read_entropy
-        stats['write_sharpness'] = math.log(self.N) - write_entropy
+        stats['read_max_weight'] = self.read_w.max().item()
+        stats['read_top3_sum'] = self.read_w.topk(min(3, self.N), dim=-1)[0].sum(-1).mean().item()
 
-        stats['hx_mean'] = self.hx.mean().item()
+        # Write head statistics
+        write_entropy = -(self.write_w * (self.write_w + eps).log()).sum(-1).mean().item()
+        stats['write_entropy'] = write_entropy
+        stats['write_sharpness'] = math.log(self.N) - write_entropy
+        stats['write_max_weight'] = self.write_w.max().item()
+        stats['write_top3_sum'] = self.write_w.topk(min(3, self.N), dim=-1)[0].sum(-1).mean().item()
+
+        # Link matrix statistics (temporal connections)
+        stats['link_density'] = (self.link_matrix.abs() > 0.01).float().mean().item()
+        stats['link_max'] = self.link_matrix.max().item()
+        stats['link_mean'] = self.link_matrix.mean().item()
+
+        # Precedence vector
+        stats['precedence_entropy'] = -(self.precedence * (self.precedence + eps).log()).sum(-1).mean().item()
+        stats['precedence_max'] = self.precedence.max().item()
 
         return stats
 
-def count_parameters(model: nn.Module) -> int:
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    def print_memory_stats(self):
+        """Pretty print memory statistics"""
+        stats = self.get_memory_usage_stats()
 
+        print("\n=== DNC Memory Statistics ===")
+        print(f"Memory Content:")
+        print(f"  Mean: {stats['memory_mean']:.4f}, Std: {stats['memory_std']:.4f}")
+        print(f"  Max: {stats['memory_abs_max']:.4f}, Sparsity: {stats['memory_sparsity']:.2%}")
+
+        print(f"\nMemory Usage (key metric):")
+        print(f"  Mean: {stats['usage_mean']:.4f}, Std: {stats['usage_std']:.4f}")
+        print(f"  Range: [{stats['usage_min']:.4f}, {stats['usage_max']:.4f}]")
+        print(f"  Slots used (>0.5): {stats['num_slots_used']:.1f}/{self.N}")
+        print(f"  Slots free (<0.1): {stats['num_slots_free']:.1f}/{self.N}")
+
+        print(f"\nRead Heads:")
+        print(f"  Entropy: {stats['read_entropy']:.4f}, Sharpness: {stats['read_sharpness']:.4f}")
+        print(f"  Max weight: {stats['read_max_weight']:.4f}, Top-3 sum: {stats['read_top3_sum']:.4f}")
+
+        print(f"\nWrite Heads:")
+        print(f"  Entropy: {stats['write_entropy']:.4f}, Sharpness: {stats['write_sharpness']:.4f}")
+        print(f"  Max weight: {stats['write_max_weight']:.4f}, Top-3 sum: {stats['write_top3_sum']:.4f}")
+
+        print(f"\nTemporal Links:")
+        print(f"  Density: {stats['link_density']:.2%}, Max: {stats['link_max']:.4f}")
+        print(f"  Precedence entropy: {stats['precedence_entropy']:.4f}, Max: {stats['precedence_max']:.4f}")
+
+        print("="*35)
 
 if __name__ == "__main__":
     # ---------------------------
@@ -573,13 +470,13 @@ if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     torch.set_default_device(device)
     print("="*70)
-    print("RTNTM - Embedding-Based Transformer Controller")
+    print("RTDNC - Embedding-Based Transformer Controller")
     print("="*70)
     print(f"Device: {device}\n")
 
-    # Configuration
-    emb_dim = 128          # Embedding and transformer hidden dimension
-    memory_N = 128         # Number of memory slots
+    # Model Meta Parameters
+    emb_dim = 200
+    memory_N = 128
     n_heads = 4
     n_layers = 2
     controller_window = 16
@@ -597,8 +494,8 @@ if __name__ == "__main__":
     print(f"  External memory: {memory_N} × {emb_dim}")
     print()
 
-    model = RTNTM(
-        vocab_size=vocab_size,
+    model = RTDNC(
+        input_size=vocab_size,
         emb_dim=emb_dim,
         memory_N=memory_N,
         n_heads=n_heads,
@@ -606,11 +503,10 @@ if __name__ == "__main__":
         controller_window=controller_window,
         read_heads=read_heads,
         write_heads=write_heads,
-        shift_width=3,
         dropout=0.1
-    ).to(device)
+    )
 
-    total_params = count_parameters(model)
+    total_params = model.num_params()
     print(f"Total parameters: {total_params:,}\n")
 
     # Test single step
@@ -621,12 +517,12 @@ if __name__ == "__main__":
     seq_len = 25
 
     torch.manual_seed(42)
-    token_seq = torch.randint(0, vocab_size, (seq_len, batch), device=device)
+    token_seq = torch.randint(0, vocab_size, (seq_len, batch))
 
     print(f"Input: seq_len={seq_len}, batch={batch}")
     print("Processing step-by-step:\n")
 
-    state = model.init_state(batch_size=batch, device=device)
+    state = model.reset(batch_size=batch)
 
     for t in range(seq_len):
         x_t = token_seq[t]
@@ -648,8 +544,8 @@ if __name__ == "__main__":
     print("Testing Full Sequence Forward Pass")
     print("="*70)
 
-    model.init_state(batch_size=batch, device=device)
-    all_logits, final_state = model.forward(token_seq, return_all_logits=True)
+    model.reset(batch_size=batch)
+    all_logits = model.forward(token_seq, return_all_logits=True)
 
     print(f"Input shape:  {token_seq.shape}")
     print(f"Output shape: {all_logits.shape}")
