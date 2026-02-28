@@ -312,6 +312,8 @@ Final model: ./models_repeat/ntm_repeat_copy_final.pt
 
 ## DNC
 
+Alex Graves, et al: https://gwern.net/doc/reinforcement-learning/model-free/2016-graves.pdf
+
 We have the DNC up and working but it appears slow.
 
 ```
